@@ -7,6 +7,7 @@
 
 export type AppTab =
   | 'welcome'
+  | 'mobile_scores'
   | 'group_1'
   | 'group_2'
   | 'group_3'
@@ -37,6 +38,7 @@ export interface ParsedRoute {
 // Canonical URL paths for tabs
 export const TAB_PATHS: Record<AppTab, string> = {
   welcome: '/home',
+  mobile_scores: '/dien-thoai',
   group_1: '/to-1',
   group_2: '/to-2',
   group_3: '/to-3',
@@ -107,6 +109,14 @@ export function parseRoute(pathname = window.location.pathname, hash = window.lo
   // 2. Tabs check
   if (path === '/' || path === '/home' || path === '/index' || path === '/trang-chu') {
     return { tab: 'welcome', modal: null };
+  }
+  if (
+    path === '/dien-thoai' ||
+    path === '/mobile' ||
+    path === '/xem-diem-di-dong' ||
+    path === '/phone'
+  ) {
+    return { tab: 'mobile_scores', modal: null };
   }
   if (
     path === '/thi-dua-toan-truong' ||

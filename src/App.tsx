@@ -41,6 +41,7 @@ import { DashboardView } from './components/DashboardView.tsx';
 import { ExportStudioView } from './components/ExportStudioView.tsx';
 import { MailboxView } from './components/MailboxView.tsx';
 import { WelcomeView } from './components/WelcomeView.tsx';
+import { MobileScoreView } from './components/MobileScoreView.tsx';
 import { ParentSubmissionDeskView } from './components/ParentSubmissionDeskView.tsx';
 import { StudentConfessionsView } from './components/StudentConfessionsView.tsx';
 import { LoginModal } from './components/LoginModal.tsx';
@@ -71,7 +72,14 @@ import { Loader2, Bell, AlertTriangle, Clock, X, ArrowRight, Lock } from 'lucide
 function MainContent() {
   const { currentUser, isTeacherOrAdmin, loading: authLoading } = useAuth();
   const initialRoute = useMemo(() => parseRoute(), []);
-  const [activeTab, setActiveTabState] = useState<AppTab>(initialRoute.tab);
+
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
+
+  const [activeTab, setActiveTabState] = useState<AppTab>(() => {
+    return initialRoute.tab === 'mobile_scores' ? 'welcome' : initialRoute.tab;
+  });
   const [currentWeek, setCurrentWeek] = useState<number>(() => detectCurrentAcademicWeek());
   const [students, setStudents] = useState<Student[]>([]);
   const [records, setRecords] = useState<PointRecord[]>([]);
@@ -188,10 +196,39 @@ function MainContent() {
 
   // Central navigation handler: updates state and syncs browser URL
   const handleNavigateTab = (tab: string, subParam?: string) => {
-    const targetTab = tab as AppTab;
+    const rawTab = tab as AppTab;
+    const targetTab: AppTab = rawTab === 'mobile_scores' ? 'welcome' : rawTab;
     setActiveTabState(targetTab);
     pushRoute(targetTab, null, subParam);
   };
+
+  // Keep viewport mode synced in real time with actual browser window width (< 768px = mobile, >= 768px = desktop)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mql = window.matchMedia('(max-width: 767px)');
+
+    const syncViewport = () => {
+      const nextIsMobile = window.innerWidth < 768 || mql.matches;
+      setIsMobileViewport(nextIsMobile);
+    };
+
+    syncViewport();
+    window.addEventListener('resize', syncViewport);
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', syncViewport);
+    } else {
+      mql.addListener(syncViewport);
+    }
+
+    return () => {
+      window.removeEventListener('resize', syncViewport);
+      if (typeof mql.removeEventListener === 'function') {
+        mql.removeEventListener('change', syncViewport);
+      } else {
+        mql.removeListener(syncViewport);
+      }
+    };
+  }, []);
 
   const handleOpenMailboxSupplemental = () => {
     setMailboxSubTab('supplemental');
@@ -208,7 +245,7 @@ function MainContent() {
   useEffect(() => {
     const handlePopState = () => {
       const parsed = parseRoute();
-      setActiveTabState(parsed.tab);
+      setActiveTabState(parsed.tab === 'mobile_scores' ? 'welcome' : parsed.tab);
       setIsLoginOpen(parsed.modal === 'login');
       setIsPasswordModalOpen(parsed.modal === 'change_password');
       setIsRulesModalOpen(parsed.modal === 'rules');
@@ -228,6 +265,7 @@ function MainContent() {
   useEffect(() => {
     const titleMap: Partial<Record<AppTab, string>> = {
       welcome: 'Trang Chủ',
+      mobile_scores: 'Xem Điểm Điện Thoại',
       group_1: 'Sổ Điểm Tổ 1',
       group_2: 'Sổ Điểm Tổ 2',
       group_3: 'Sổ Điểm Tổ 3',
@@ -344,6 +382,7 @@ function MainContent() {
   // 2. Lazy load Students & Scoring Rules (scoped to selectedClassId)
   useEffect(() => {
     const needsStudentsOrRules =
+      isMobileViewport ||
       Boolean(currentUser) ||
       activeTab !== 'welcome' ||
       isStudentManagementOpen ||
@@ -366,6 +405,7 @@ function MainContent() {
       if (unsubRules) unsubRules();
     };
   }, [
+    isMobileViewport,
     selectedClassId,
     activeTab,
     currentUser,
@@ -378,6 +418,7 @@ function MainContent() {
   // 3. Lazy load Point Records (scoped to selectedClassId)
   useEffect(() => {
     const needsRecords =
+      isMobileViewport ||
       [
         'group_1',
         'group_2',
@@ -389,7 +430,8 @@ function MainContent() {
         'dashboard',
         'export_results',
         'mailbox',
-      ].includes(activeTab) || isAiAssistantOpen;
+      ].includes(activeTab) ||
+      isAiAssistantOpen;
 
     if (!needsRecords) {
       setDataLoading(false);
@@ -404,7 +446,7 @@ function MainContent() {
     return () => {
       if (unsubRecords) unsubRecords();
     };
-  }, [selectedClassId, activeTab, isAiAssistantOpen]);
+  }, [isMobileViewport, selectedClassId, activeTab, isAiAssistantOpen]);
 
   // 4. Lazy load Notifications (also live for logged-in users to show badge updates)
   useEffect(() => {
@@ -646,46 +688,99 @@ function MainContent() {
     );
   }
 
-  // If not logged in or requested by user/actions, prompt login modal
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
-      {/* Top Header & Navigation */}
-      <Navbar
-        activeTab={activeTab}
-        setActiveTab={handleNavigateTab}
-        currentWeek={currentWeek}
-        setCurrentWeek={setCurrentWeek}
-        onOpenRules={handleOpenRules}
-        onOpenChangePassword={handleOpenChangePassword}
-        onOpenLogin={() => handleOpenLogin()}
-        unreadNotifsCount={unreadNotifsCount}
-        onOpenNotifications={handleOpenNotifications}
-        onOpenCreateNotif={() => {
-          if (!currentUser) {
-            handleOpenLogin('Vui lòng đăng nhập với tài khoản Quản lý để phát thông báo cho lớp.');
-          } else {
-            setIsCreateNotifOpen(true);
-          }
-        }}
-        weekLocks={weekLocks}
-        onOpenWeekLockModal={handleOpenWeekLockModal}
-        studentProgressSubMode={studentProgressSubMode}
-        onSelectStudentProgressSubMode={(subMode) => {
-          setStudentProgressSubMode(subMode);
-          handleNavigateTab('student_progress');
-        }}
-        selectedClassId={selectedClassId}
-        onSelectClass={setSelectedClassId}
-        onOpenCityContest={() => setIsCityContestOpen(true)}
-        systemConfig={systemConfig}
-        onOpenSystemSettings={() => setIsSystemSettingsOpen(true)}
-        students={currentClassStudents}
-        onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
-        pendingSupplementalCount={pendingSupplementalCountForNavbar}
-      />
+      {isMobileViewport ? (
+        <MobileScoreView
+          activeTab={activeTab}
+          onNavigateTab={handleNavigateTab}
+          studentProgressSubMode={studentProgressSubMode}
+          onSelectStudentProgressSubMode={(subMode) => setStudentProgressSubMode(subMode)}
+          selectedStudentIdForProgress={selectedStudentIdForProgress}
+          onSelectStudentForProgress={(sid) => setSelectedStudentIdForProgress(sid)}
+          currentWeek={currentWeek}
+          setCurrentWeek={setCurrentWeek}
+          students={currentClassStudents}
+          records={currentClassRecords}
+          rules={currentClassRules}
+          weekLocks={weekLocks}
+          selectedClassId={selectedClassId}
+          onSelectClass={setSelectedClassId}
+          selectedClass={selectedClass}
+          systemConfig={systemConfig}
+          notifications={notifications}
+          unreadNotifsCount={unreadNotifsCount}
+          urgentAnnouncement={urgentAnnouncement}
+          onDismissUrgentBanner={(id) => setDismissedBannerId(id)}
+          supplementalRequests={supplementalRequests}
+          pendingSupplementalCount={pendingSupplementalCountForNavbar}
+          mailboxSubTab={mailboxSubTab}
+          setMailboxSubTab={setMailboxSubTab}
+          onNavigateToMailboxSupplemental={handleOpenMailboxSupplemental}
+          parentDocRequirements={parentDocRequirements}
+          parentSubmissions={parentSubmissions.filter(
+            (s) => (s.classId || '8A1') === selectedClassId
+          )}
+          studentConfessions={studentConfessions.filter(
+            (c) => (c.classId || '8A1') === selectedClassId
+          )}
+          onOpenNotifications={handleOpenNotifications}
+          onOpenCreateNotif={() => {
+            if (!currentUser) {
+              handleOpenLogin('Vui lòng đăng nhập với tài khoản Quản lý để phát thông báo cho lớp.');
+            } else {
+              setIsCreateNotifOpen(true);
+            }
+          }}
+          onOpenRules={handleOpenRules}
+          onOpenRulesManagement={() => setIsRulesManagementOpen(true)}
+          onOpenStudentManagement={() => setIsStudentManagementOpen(true)}
+          onOpenLogin={handleOpenLogin}
+          onOpenChangePassword={handleOpenChangePassword}
+          onOpenWeekLockModal={handleOpenWeekLockModal}
+          onOpenCityContest={() => setIsCityContestOpen(true)}
+          onOpenSystemSettings={() => setIsSystemSettingsOpen(true)}
+          onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+        />
+      ) : (
+        <>
+          {/* Top Header & Navigation */}
+          <Navbar
+            activeTab={activeTab}
+            setActiveTab={handleNavigateTab}
+            currentWeek={currentWeek}
+            setCurrentWeek={setCurrentWeek}
+            onOpenRules={handleOpenRules}
+            onOpenChangePassword={handleOpenChangePassword}
+            onOpenLogin={() => handleOpenLogin()}
+            unreadNotifsCount={unreadNotifsCount}
+            onOpenNotifications={handleOpenNotifications}
+            onOpenCreateNotif={() => {
+              if (!currentUser) {
+                handleOpenLogin('Vui lòng đăng nhập với tài khoản Quản lý để phát thông báo cho lớp.');
+              } else {
+                setIsCreateNotifOpen(true);
+              }
+            }}
+            weekLocks={weekLocks}
+            onOpenWeekLockModal={handleOpenWeekLockModal}
+            studentProgressSubMode={studentProgressSubMode}
+            onSelectStudentProgressSubMode={(subMode) => {
+              setStudentProgressSubMode(subMode);
+              handleNavigateTab('student_progress');
+            }}
+            selectedClassId={selectedClassId}
+            onSelectClass={setSelectedClassId}
+            onOpenCityContest={() => setIsCityContestOpen(true)}
+            systemConfig={systemConfig}
+            onOpenSystemSettings={() => setIsSystemSettingsOpen(true)}
+            students={currentClassStudents}
+            onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+            pendingSupplementalCount={pendingSupplementalCountForNavbar}
+          />
 
-      {/* Main Container */}
-      <main className="flex-1 w-full px-4 sm:px-6 lg:px-8 xl:px-10 py-4 sm:py-6 space-y-4">
+          {/* Main Container */}
+          <main className="flex-1 w-full px-4 sm:px-6 lg:px-8 xl:px-10 py-4 sm:py-6 space-y-4">
         {/* Urgent Announcement Banner if active */}
         {urgentAnnouncement && (
           <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-blue-800 text-white p-3 sm:p-3.5 rounded-2xl shadow-sm flex items-center justify-between gap-3 text-xs">
@@ -965,10 +1060,17 @@ function MainContent() {
             selectedClass={selectedClass}
           />
         )}
-      </main>
+          </main>
 
+          {/* AI Assistant Floating Button (desktop only, mobile uses top bar button) */}
+          <AiAssistantFab
+            isOpen={isAiAssistantOpen}
+            onOpen={() => setIsAiAssistantOpen(true)}
+          />
+        </>
+      )}
 
-      {/* Global Modals */}
+      {/* Global Modals (Unified across Mobile and Desktop viewports) */}
       <LoginModal
         isOpen={isLoginOpen}
         onClose={handleCloseLogin}
@@ -1031,12 +1133,6 @@ function MainContent() {
         systemConfig={systemConfig}
         selectedClassId={selectedClassId}
         onSelectClass={setSelectedClassId}
-      />
-
-      {/* AI Assistant Floating Button & Drawer Modal */}
-      <AiAssistantFab
-        isOpen={isAiAssistantOpen}
-        onOpen={() => setIsAiAssistantOpen(true)}
       />
       <AiAssistantModal
         isOpen={isAiAssistantOpen}
