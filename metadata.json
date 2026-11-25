@@ -1,0 +1,8 @@
+{
+  "name": "quanlyndd",
+  "description": "Imported from GitHub: quanghieu1811/quanly8a1",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

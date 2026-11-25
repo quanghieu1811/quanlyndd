@@ -1,0 +1,534 @@
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+body {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+/* ==========================================================================
+   MID-AUTUMN FESTIVAL (TẾT TRUNG THU) ATMOSPHERIC STYLES & ANIMATIONS
+   ========================================================================== */
+@keyframes float-gentle {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(2deg);
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 0.85;
+    filter: drop-shadow(0 0 8px rgba(251, 191, 36, 0.4));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 16px rgba(251, 191, 36, 0.8));
+  }
+}
+
+@keyframes twinkle {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.animate-float-gentle {
+  animation: float-gentle 4s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 3s ease-in-out infinite;
+}
+
+.animate-twinkle {
+  animation: twinkle 2.5s ease-in-out infinite;
+}
+
+/* Glassmorphic cards on top of Mid-Autumn background */
+.mid-autumn-glass {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* ==========================================================================
+   HIGH-CONTRAST THEME SPECIFICATION (LIGHT & DARK MODE)
+   Engineered for maximum legibility, WCAG AA/AAA compliance & zero washed-out text
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   LIGHT MODE CONTRAST BOOSTERS
+   Fix faint / washed-out secondary labels, dates, counts & yellow text
+   -------------------------------------------------------------------------- */
+html:not(.dark) .text-slate-400 {
+  color: #475569 !important; /* slate-600: strong 7.0:1 contrast against white/slate-50 */
+}
+
+html:not(.dark) .text-slate-300 {
+  color: #64748b !important; /* slate-500 */
+}
+
+html:not(.dark) .text-slate-500 {
+  color: #334155 !important; /* slate-700: 9.0:1 contrast */
+}
+
+/* Yellow/Amber text on white/cream backgrounds in light mode */
+html:not(.dark) .text-amber-500,
+html:not(.dark) .text-amber-600 {
+  color: #92400e !important; /* amber-800: high contrast dark amber */
+}
+
+html:not(.dark) .text-yellow-600,
+html:not(.dark) .text-yellow-500 {
+  color: #854d0e !important; /* yellow-800 */
+}
+
+html:not(.dark) .text-emerald-500 {
+  color: #047857 !important; /* emerald-700 */
+}
+
+/* --------------------------------------------------------------------------
+   SOLID BRIGHT BADGES / MEDALS (Rank #1, Gold Medals, Yellow Chips)
+   Rule: MUST ALWAYS have deep dark text (#451a03) in BOTH Light and Dark mode.
+   Never allow white or bright yellow text on bright yellow/gold backgrounds!
+   -------------------------------------------------------------------------- */
+.bg-amber-400,
+.bg-amber-300,
+.bg-amber-200,
+.bg-yellow-400,
+.bg-yellow-300,
+html.dark .bg-amber-400,
+html.dark .bg-amber-300,
+html.dark .bg-amber-200,
+html.dark .bg-yellow-400,
+html.dark .bg-yellow-300 {
+  color: #451a03 !important;
+}
+
+.bg-amber-400 *,
+.bg-amber-300 *,
+.bg-amber-200 *,
+.bg-yellow-400 *,
+.bg-yellow-300 *,
+html.dark .bg-amber-400 *,
+html.dark .bg-amber-300 *,
+html.dark .bg-amber-200 *,
+html.dark .bg-yellow-400 *,
+html.dark .bg-yellow-300 * {
+  color: #451a03 !important;
+  fill: #451a03 !important;
+}
+
+/* --------------------------------------------------------------------------
+   DARK MODE COMPREHENSIVE SPECIFICATION
+   -------------------------------------------------------------------------- */
+
+/* 1. Canvas & Structural Surfaces */
+html.dark body {
+  background-color: #0b1120 !important;
+  color: #f8fafc !important;
+}
+
+html.dark header,
+html.dark footer,
+html.dark .bg-white {
+  background-color: #151e32 !important;
+}
+
+/* Dark mode overrides for translucent/slashed white backgrounds */
+html.dark [class*="bg-white/"] {
+  background-color: rgba(21, 30, 50, 0.9) !important;
+}
+
+/* Background slate surfaces with any opacity */
+html.dark [class*="bg-slate-50"] {
+  background-color: #0f172a !important;
+}
+
+html.dark [class*="bg-slate-100"] {
+  background-color: #1e293b !important;
+  color: #f8fafc !important;
+}
+
+html.dark [class*="bg-slate-200"],
+html.dark [class*="bg-slate-300"] {
+  background-color: #273752 !important;
+}
+
+/* 2. Razor-Sharp Card & Table Borders */
+html.dark [class*="border-slate-100"],
+html.dark [class*="border-slate-200"],
+html.dark [class*="border-slate-300"] {
+  border-color: #25334d !important;
+}
+
+html.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
+html.dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #1e293b !important;
+}
+
+/* 3. High-Contrast Typography in Dark Mode */
+html.dark .text-slate-900,
+html.dark .text-slate-800 {
+  color: #ffffff !important;
+}
+
+html.dark .text-slate-700 {
+  color: #f1f5f9 !important;
+}
+
+html.dark .text-slate-600 {
+  color: #e2e8f0 !important;
+}
+
+html.dark .text-slate-500 {
+  color: #cbd5e1 !important;
+}
+
+html.dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+html.dark .text-slate-300 {
+  color: #64748b !important;
+}
+
+/* 4. Vibrant High-Contrast Text Accents */
+/* Blue Text */
+html.dark .text-blue-600,
+html.dark .text-blue-700,
+html.dark .text-blue-800,
+html.dark .text-blue-900 {
+  color: #60a5fa !important;
+}
+
+/* Emerald Text (Plus points (+)) */
+html.dark .text-emerald-600,
+html.dark .text-emerald-700,
+html.dark .text-emerald-800,
+html.dark .text-emerald-900,
+html.dark .text-green-600,
+html.dark .text-green-700 {
+  color: #34d399 !important;
+}
+
+/* Rose / Red Text (Minus points (-)) */
+html.dark .text-rose-600,
+html.dark .text-rose-700,
+html.dark .text-rose-800,
+html.dark .text-rose-900,
+html.dark .text-red-600,
+html.dark .text-red-700 {
+  color: #fb7185 !important;
+}
+
+/* Amber / Yellow Text (excluding text-amber-950 which is reserved for dark text on yellow badges) */
+html.dark .text-amber-500,
+html.dark .text-amber-600,
+html.dark .text-amber-700,
+html.dark .text-amber-800,
+html.dark .text-amber-900,
+html.dark .text-yellow-600,
+html.dark .text-yellow-700 {
+  color: #fbbf24 !important;
+}
+
+/* Indigo / Purple / Sky Text */
+html.dark .text-indigo-600,
+html.dark .text-indigo-700,
+html.dark .text-indigo-800 {
+  color: #a5b4fc !important;
+}
+
+html.dark .text-purple-600,
+html.dark .text-purple-700,
+html.dark .text-purple-800 {
+  color: #c084fc !important;
+}
+
+html.dark .text-sky-600,
+html.dark .text-sky-700 {
+  color: #7dd3fc !important;
+}
+
+/* 5. Comprehensive Tinted Alert & Badge Containers in Dark Mode
+   Matches ALL opacity variations (e.g. bg-amber-50/90, bg-amber-50/80, bg-amber-50/60)
+   to ensure NO container remains a washed-out light background in dark mode */
+
+/* Amber / Yellow Containers */
+html.dark [class*="bg-amber-50"],
+html.dark [class*="bg-amber-100"],
+html.dark [class*="bg-amber-700/"],
+html.dark [class*="bg-yellow-50"],
+html.dark [class*="bg-yellow-100"] {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+  border-color: rgba(251, 191, 36, 0.35) !important;
+  color: #fde68a !important;
+}
+
+/* Blue Containers */
+html.dark [class*="bg-blue-50"],
+html.dark [class*="bg-blue-100"] {
+  background-color: rgba(59, 130, 246, 0.15) !important;
+  border-color: rgba(96, 165, 250, 0.35) !important;
+  color: #93c5fd !important;
+}
+
+/* Emerald Containers */
+html.dark [class*="bg-emerald-50"],
+html.dark [class*="bg-emerald-100"],
+html.dark [class*="bg-green-50"],
+html.dark [class*="bg-green-100"] {
+  background-color: rgba(16, 185, 129, 0.15) !important;
+  border-color: rgba(52, 211, 153, 0.35) !important;
+  color: #6ee7b7 !important;
+}
+
+/* Rose Containers */
+html.dark [class*="bg-rose-50"],
+html.dark [class*="bg-rose-100"],
+html.dark [class*="bg-red-50"],
+html.dark [class*="bg-red-100"] {
+  background-color: rgba(244, 63, 94, 0.15) !important;
+  border-color: rgba(251, 113, 133, 0.35) !important;
+  color: #fda4af !important;
+}
+
+/* Purple Containers */
+html.dark [class*="bg-purple-50"],
+html.dark [class*="bg-purple-100"] {
+  background-color: rgba(168, 85, 247, 0.15) !important;
+  border-color: rgba(192, 132, 252, 0.35) !important;
+  color: #e9d5ff !important;
+}
+
+/* Indigo Containers */
+html.dark [class*="bg-indigo-50"],
+html.dark [class*="bg-indigo-100"] {
+  background-color: rgba(99, 102, 241, 0.15) !important;
+  border-color: rgba(129, 140, 248, 0.35) !important;
+  color: #c7d2fe !important;
+}
+
+/* Sky Containers */
+html.dark [class*="bg-sky-50"],
+html.dark [class*="bg-sky-100"] {
+  background-color: rgba(14, 165, 233, 0.15) !important;
+  border-color: rgba(56, 189, 248, 0.35) !important;
+  color: #bae6fd !important;
+}
+
+/* 6. Form Controls & Dropdowns */
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea {
+  background-color: #0f172a !important;
+  color: #ffffff !important;
+  border-color: #2b3b57 !important;
+}
+
+html.dark input:focus,
+html.dark select:focus,
+html.dark textarea:focus {
+  border-color: #3b82f6 !important;
+  outline: 2px solid rgba(59, 130, 246, 0.4) !important;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* 7. Hover & Active States */
+html.dark .hover\:bg-slate-50:hover,
+html.dark .hover\:bg-slate-50\/70:hover,
+html.dark .hover\:bg-slate-100:hover {
+  background-color: #1a2538 !important;
+}
+
+html.dark .hover\:bg-slate-200:hover {
+  background-color: #26344d !important;
+}
+
+html.dark .hover\:bg-white:hover {
+  background-color: #1a2538 !important;
+}
+
+/* 8. Gradient & Podium Overrides */
+html.dark .to-white {
+  --tw-gradient-to: #151e32 var(--tw-gradient-to-position) !important;
+}
+
+html.dark .from-white {
+  --tw-gradient-from: #151e32 var(--tw-gradient-from-position) !important;
+}
+
+html.dark .via-amber-50\/50 {
+  --tw-gradient-stops: var(--tw-gradient-from), rgba(245, 158, 11, 0.12) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+}
+
+/* 9. Modal Backdrops & Shadows */
+html.dark .bg-slate-900\/60,
+html.dark .bg-black\/50,
+html.dark .bg-black\/60 {
+  background-color: rgba(3, 7, 18, 0.85) !important;
+}
+
+/* 10. Recharts / Data Visualization */
+html.dark .recharts-cartesian-grid-horizontal line,
+html.dark .recharts-cartesian-grid-vertical line {
+  stroke: #223048 !important;
+}
+
+html.dark .recharts-default-tooltip {
+  background-color: #0f172a !important;
+  border-color: #25334d !important;
+  color: #f8fafc !important;
+}
+
+/* 11. Custom Scrollbars */
+html.dark ::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+html.dark ::-webkit-scrollbar-track {
+  background: #0b1120;
+}
+html.dark ::-webkit-scrollbar-thumb {
+  background: #2b3b57;
+  border-radius: 9999px;
+}
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: #3b4f73;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm 15mm 15mm 15mm;
+  }
+
+  @page :left {
+    margin: 12mm 15mm 15mm 15mm;
+  }
+
+  @page :right {
+    margin: 12mm 15mm 15mm 15mm;
+  }
+
+  /* Hide interactive, navigation, and administrative elements */
+  header, footer, nav, button, select, input, textarea,
+  .print\:hidden,
+  .no-print,
+  #btn-quick-add-point {
+    display: none !important;
+  }
+
+  /* Force pure white background and crisp dark text */
+  html, body, #root {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    font-size: 10.5pt !important;
+    line-height: 1.4 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+  }
+
+  /* Ensure color fidelity without shadows or dark filters */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    text-shadow: none !important;
+    box-shadow: none !important;
+  }
+
+  /* Display print-specific elements */
+  .print\:block {
+    display: block !important;
+  }
+  .print\:inline-block {
+    display: inline-block !important;
+  }
+  .print\:flex {
+    display: flex !important;
+  }
+  .print\:inline-flex {
+    display: inline-flex !important;
+  }
+  .print\:grid {
+    display: grid !important;
+  }
+  .print\:table {
+    display: table !important;
+  }
+  .print\:table-row {
+    display: table-row !important;
+  }
+  .print\:table-cell {
+    display: table-cell !important;
+  }
+
+  /* Table styling for official school reports */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto !important;
+    font-size: 10pt !important;
+  }
+
+  th, td {
+    border: 1px solid #475569 !important;
+    padding: 6px 8px !important;
+    color: #0f172a !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+    background-color: #f1f5f9 !important;
+  }
+
+  tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Page break controls */
+  .print-page-break {
+    page-break-before: always !important;
+    break-before: page !important;
+  }
+
+  .print-avoid-break {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Unclip overflow containers to print complete content */
+  .overflow-x-auto, .overflow-y-auto, .overflow-hidden, .max-h-72, .max-h-96 {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* Preserve printable containers */
+  .printable-document {
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+}

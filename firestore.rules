@@ -1,0 +1,176 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.\\@\\s]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // 1. Account Credentials Collection (PBKDF2 Password Hashes & Salts)
+    // Strictest security: Scrapes and list queries are strictly FORBIDDEN.
+    // Plaintext passwords are not stored. Only single-document lookups for credential verification are allowed.
+    match /account_credentials/{username} {
+      allow list: if false;
+      allow get: if isValidId(username);
+      allow create, update: if isValidId(username)
+        && incoming().hash is string && incoming().hash.size() > 0 && incoming().hash.size() <= 128
+        && incoming().salt is string && incoming().salt.size() > 0 && incoming().salt.size() <= 128;
+      allow delete: if false;
+    }
+
+    // 2. User Accounts (Public Directory)
+    // Plaintext passwords are FORBIDDEN in this collection.
+    // Callers cannot inject or modify 'password' field in accounts.
+    match /accounts/{username} {
+      allow read: if isValidId(username);
+      allow list: if true;
+      allow create, update: if isValidId(username)
+        && !('password' in incoming());
+      allow delete: if false;
+    }
+
+    // 3. Students Roster
+    match /students/{studentId} {
+      allow read: if isValidId(studentId);
+      allow list: if true;
+      allow create, update: if isValidId(studentId)
+        && incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100
+        && incoming().group is number;
+      allow delete: if isValidId(studentId);
+    }
+
+    // 4. Point Records (Discipline & Commendation)
+    match /point_records/{recordId} {
+      allow read: if isValidId(recordId);
+      allow list: if true;
+      allow create: if isValidId(recordId)
+        && incoming().studentId is string
+        && incoming().studentName is string
+        && incoming().points is number
+        && incoming().category is string;
+      allow update: if isValidId(recordId)
+        && incoming().points is number;
+      allow delete: if isValidId(recordId);
+    }
+
+    // 5. Scoring Rules Catalog
+    match /scoring_rules/{ruleId} {
+      allow read: if isValidId(ruleId);
+      allow list: if true;
+      allow create, update: if isValidId(ruleId)
+        && incoming().title is string && incoming().title.size() > 0 && incoming().title.size() <= 300
+        && incoming().points is number;
+      allow delete: if isValidId(ruleId);
+    }
+
+    // 6. School Notifications
+    match /notifications/{notifId} {
+      allow read: if isValidId(notifId);
+      allow list: if true;
+      allow create, update: if isValidId(notifId)
+        && incoming().title is string && incoming().title.size() <= 300
+        && incoming().message is string;
+      allow delete: if isValidId(notifId);
+    }
+
+    // 7. Score Reports
+    match /score_reports/{reportId} {
+      allow read: if isValidId(reportId);
+      allow list: if true;
+      allow create: if isValidId(reportId)
+        && incoming().studentName is string
+        && incoming().reportedErrorType is string;
+      allow update: if isValidId(reportId);
+      allow delete: if isValidId(reportId);
+    }
+
+    // 8. Feature Suggestions
+    match /feature_suggestions/{suggestionId} {
+      allow read: if isValidId(suggestionId);
+      allow list: if true;
+      allow create: if isValidId(suggestionId)
+        && incoming().title is string
+        && incoming().content is string;
+      allow update: if isValidId(suggestionId);
+      allow delete: if isValidId(suggestionId);
+    }
+
+    // 9. Week Locks
+    match /week_locks/{lockId} {
+      allow read: if isValidId(lockId);
+      allow list: if true;
+      allow create, update: if isValidId(lockId)
+        && incoming().week is number;
+      allow delete: if isValidId(lockId);
+    }
+
+    // 10. Parent Document Requirements
+    match /parent_doc_configs/{reqId} {
+      allow read: if isValidId(reqId);
+      allow list: if true;
+      allow create, update: if isValidId(reqId)
+        && incoming().title is string;
+      allow delete: if isValidId(reqId);
+    }
+
+    // 11. Parent Submissions
+    match /parent_submissions/{subId} {
+      allow read: if isValidId(subId);
+      allow list: if true;
+      allow create, update: if isValidId(subId)
+        && incoming().studentName is string
+        && incoming().parentName is string;
+      allow delete: if isValidId(subId);
+    }
+
+    // 12. Student Confessions
+    match /student_confessions/{confId} {
+      allow read: if isValidId(confId);
+      allow list: if true;
+      allow create: if isValidId(confId)
+        && incoming().title is string
+        && incoming().content is string;
+      allow update: if isValidId(confId);
+      allow delete: if isValidId(confId);
+    }
+
+    // 13. System Settings
+    match /system_settings/{docId} {
+      allow read: if isValidId(docId);
+      allow list: if true;
+      allow create, update: if isValidId(docId)
+        && incoming().schoolName is string;
+      allow delete: if false;
+    }
+
+    // 14. Supplemental Score Requests (Group Leaders -> Admin / GVCN / Class Monitor)
+    match /supplemental_score_requests/{requestId} {
+      allow read: if isValidId(requestId);
+      allow list: if true;
+      allow create: if isValidId(requestId)
+        && incoming().classId is string && incoming().classId.size() > 0 && incoming().classId.size() <= 30
+        && incoming().week is number && incoming().week >= 1 && incoming().week <= 35
+        && incoming().group is number && incoming().group >= 1 && incoming().group <= 4
+        && incoming().requesterUsername is string && incoming().requesterUsername.size() > 0 && incoming().requesterUsername.size() <= 100
+        && incoming().requesterName is string && incoming().requesterName.size() > 0 && incoming().requesterName.size() <= 150
+        && incoming().reason is string && incoming().reason.size() > 0 && incoming().reason.size() <= 1000
+        && incoming().requestedDurationHours is number && incoming().requestedDurationHours > 0 && incoming().requestedDurationHours <= 720
+        && incoming().status == 'pending'
+        && (!('targetStudentNames' in incoming()) || (incoming().targetStudentNames is string && incoming().targetStudentNames.size() <= 500))
+        && (!('proposedDetails' in incoming()) || (incoming().proposedDetails is string && incoming().proposedDetails.size() <= 1000));
+      allow update: if isValidId(requestId)
+        && incoming().status in ['pending', 'approved', 'rejected']
+        && (!('reviewNote' in incoming()) || (incoming().reviewNote is string && incoming().reviewNote.size() <= 1000));
+      allow delete: if isValidId(requestId);
+    }
+  }
+}

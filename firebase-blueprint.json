@@ -1,0 +1,345 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Tài khoản người dùng trong hệ thống (Admin, GVCN, Lớp trưởng, Lớp phó, Tổ trưởng, PHHS)",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string" },
+        "classId": { "type": "string" },
+        "assignedGroup": { "type": "number" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "studentSTT": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["username", "displayName", "role"]
+    },
+    "AccountCredential": {
+      "title": "AccountCredential",
+      "description": "Kho lưu trữ thông tin băm mật khẩu bảo mật (nghiêm cấm đọc/ghi công khai)",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "hash": { "type": "string" },
+        "salt": { "type": "string" },
+        "iterations": { "type": "number" },
+        "_systemAuthKey": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["username", "hash", "salt"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Học sinh trong danh sách các lớp, phân tổ và ban cán sự",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "stt": { "type": "number" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "group": { "type": "number" },
+        "classId": { "type": "string" },
+        "gender": { "type": "string", "enum": ["Nam", "Nữ"] },
+        "roleInGroup": { "type": "string" },
+        "dob": { "type": "string" },
+        "baseScore": { "type": "number" }
+      },
+      "required": ["name", "group", "gender"]
+    },
+    "PointRecord": {
+      "title": "PointRecord",
+      "description": "Bản ghi cộng trừ điểm thi đua theo tuần của học sinh",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "group": { "type": "number" },
+        "classId": { "type": "string" },
+        "week": { "type": "number" },
+        "type": { "type": "string", "enum": ["plus", "minus"] },
+        "points": { "type": "number" },
+        "category": { "type": "string" },
+        "ruleTitle": { "type": "string" },
+        "reason": { "type": "string" },
+        "creatorUsername": { "type": "string" },
+        "creatorName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["studentId", "studentName", "group", "week", "type", "points", "category", "reason", "creatorUsername", "createdAt"]
+    },
+    "ScoringRule": {
+      "title": "ScoringRule",
+      "description": "Quy định trong khung điểm thi đua khen thưởng và kỷ luật của các lớp",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "category": { "type": "string", "enum": ["class_reward", "class_penalty", "school_penalty"] },
+        "type": { "type": "string", "enum": ["plus", "minus"] },
+        "title": { "type": "string" },
+        "detail": { "type": "string" },
+        "points": { "type": "number" },
+        "multiplier": { "type": "number" },
+        "referenceDoc": { "type": "string" }
+      },
+      "required": ["category", "type", "title", "points"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "Thông báo, nhắc nhở nề nếp và lịch họp trong hệ thống",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "classId": { "type": "string" },
+        "targetGroup": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "isImportant": { "type": "boolean" },
+        "readBy": { "type": "array" }
+      },
+      "required": ["type", "title", "message", "createdAt"]
+    },
+    "ScoreReport": {
+      "title": "ScoreReport",
+      "description": "Báo cáo trường hợp nhập sai điểm thi đua của học sinh gửi về admin, gvcn, loptruong, loppho và tổ trưởng",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "week": { "type": "number" },
+        "group": { "type": "number" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "pointRecordId": { "type": "string" },
+        "pointRecordSummary": { "type": "string" },
+        "reportedErrorType": { "type": "string" },
+        "errorDescription": { "type": "string" },
+        "evidenceOrNote": { "type": "string" },
+        "reporterName": { "type": "string" },
+        "reporterRoleOrRelationship": { "type": "string" },
+        "reporterContact": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "resolved", "rejected"] },
+        "resolutionNote": { "type": "string" },
+        "resolvedBy": { "type": "string" },
+        "resolvedByName": { "type": "string" },
+        "resolvedAt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "notifiedRoles": { "type": "array" }
+      },
+      "required": ["week", "group", "studentId", "studentName", "reportedErrorType", "errorDescription", "reporterName", "status", "createdAt"]
+    },
+    "FeatureSuggestion": {
+      "title": "FeatureSuggestion",
+      "description": "Hòm thư góp ý các tính năng mới để phát triển gửi riêng cho admin",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string", "enum": ["feature", "ui_ux", "rules", "performance", "other"] },
+        "content": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderUsername": { "type": "string" },
+        "senderContact": { "type": "string" },
+        "status": { "type": "string", "enum": ["new", "reviewing", "planned", "completed", "declined"] },
+        "adminNotes": { "type": "string" },
+        "adminRepliedAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["title", "category", "content", "senderName", "createdAt", "status"]
+    },
+    "WeekLockConfig": {
+      "title": "WeekLockConfig",
+      "description": "Cấu hình lịch khóa sổ tự động/thủ công cho từng tuần thi đua",
+      "type": "object",
+      "properties": {
+        "week": { "type": "number" },
+        "classId": { "type": "string" },
+        "isLocked": { "type": "boolean" },
+        "autoLockEnabled": { "type": "boolean" },
+        "lockDeadline": { "type": "string" },
+        "lockedAt": { "type": "string" },
+        "lockedBy": { "type": "string" },
+        "lockedByName": { "type": "string" },
+        "note": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["week", "isLocked", "updatedAt"]
+    },
+    "ParentDocRequirement": {
+      "title": "ParentDocRequirement",
+      "description": "Cấu hình danh mục hồ sơ / giấy tờ cần nộp từ Phụ huynh học sinh",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "deadline": { "type": "string" },
+        "isRequired": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "title", "description", "isActive", "createdAt"]
+    },
+    "ParentSubmission": {
+      "title": "ParentSubmission",
+      "description": "Bản ghi nộp hồ sơ, giấy tờ hoặc minh chứng từ PHHS",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "requirementId": { "type": "string" },
+        "requirementTitle": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "group": { "type": "number" },
+        "parentUsername": { "type": "string" },
+        "parentName": { "type": "string" },
+        "parentPhone": { "type": "string" },
+        "notes": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "fileName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "need_supplement"] },
+        "submittedAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["requirementId", "requirementTitle", "studentId", "studentName", "group", "parentUsername", "parentName", "status", "submittedAt", "updatedAt"]
+    },
+    "StudentConfession": {
+      "title": "StudentConfession",
+      "description": "Tâm sự, nỗi niềm thầm kín học trò gửi lên Bảng tin lớp hoặc riêng Cô chủ nhiệm",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "authorType": { "type": "string", "enum": ["anonymous", "named"] },
+        "authorName": { "type": "string" },
+        "group": { "type": "number" },
+        "mood": { "type": "string" },
+        "visibility": { "type": "string", "enum": ["public", "private_teacher"] },
+        "likesCount": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "teacherReply": { "type": "string" },
+        "teacherRepliedAt": { "type": "string" },
+        "teacherRepliedBy": { "type": "string" }
+      },
+      "required": ["title", "content", "authorType", "mood", "visibility", "likesCount", "createdAt"]
+    },
+    "SchoolSystemConfig": {
+      "title": "SchoolSystemConfig",
+      "description": "Cấu hình hệ thống nhà trường, niên khóa, danh sách lớp học và danh mục môn học",
+      "type": "object",
+      "properties": {
+        "schoolName": { "type": "string" },
+        "schoolShortName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "locationName": { "type": "string" },
+        "currentSemester": { "type": "number" },
+        "startDate": { "type": "string" },
+        "totalWeeks": { "type": "number" },
+        "penaltyWarningThreshold": { "type": "number" },
+        "subjects": { "type": "array" },
+        "classes": { "type": "array" }
+      },
+      "required": ["schoolName", "schoolShortName", "academicYear", "subjects", "classes"]
+    },
+    "SupplementalScoreRequest": {
+      "title": "SupplementalScoreRequest",
+      "description": "Đơn xin phép nhập điểm bổ sung do tổ trưởng gửi lên để Admin, GVCN hoặc Lớp trưởng phê duyệt",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "classId": { "type": "string" },
+        "week": { "type": "number" },
+        "group": { "type": "number" },
+        "requesterUsername": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "requesterRole": { "type": "string" },
+        "reason": { "type": "string" },
+        "targetStudentNames": { "type": "string" },
+        "proposedDetails": { "type": "string" },
+        "requestedDurationHours": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "approvedDurationHours": { "type": "number" },
+        "expiresAt": { "type": "string" },
+        "revokedAt": { "type": "string" },
+        "revokedBy": { "type": "string" },
+        "reviewedBy": { "type": "string" },
+        "reviewedByName": { "type": "string" },
+        "reviewedByRole": { "type": "string" },
+        "reviewNote": { "type": "string" },
+        "reviewedAt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["classId", "week", "group", "requesterUsername", "requesterName", "reason", "requestedDurationHours", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/account_credentials/{username}": {
+      "schema": "AccountCredential",
+      "description": "Kho lưu trữ thông tin băm mật khẩu bảo mật (nghiêm cấm đọc/ghi công khai)"
+    },
+    "/accounts/{username}": {
+      "schema": "UserAccount",
+      "description": "Danh sách các tài khoản cán bộ lớp, GVCN, Admin và PHHS"
+    },
+    "/students/{studentId}": {
+      "schema": "Student",
+      "description": "Danh sách học sinh, phân tổ và chức vụ ban cán sự"
+    },
+    "/point_records/{recordId}": {
+      "schema": "PointRecord",
+      "description": "Nhật ký cộng trừ điểm thi đua của học sinh"
+    },
+    "/scoring_rules/{ruleId}": {
+      "schema": "ScoringRule",
+      "description": "Khung quy chế điểm thưởng kỷ luật"
+    },
+    "/notifications/{notifId}": {
+      "schema": "NotificationItem",
+      "description": "Thông báo và nhắc nhở toàn trường"
+    },
+    "/score_reports/{reportId}": {
+      "schema": "ScoreReport",
+      "description": "Báo cáo nhập sai điểm thi đua"
+    },
+    "/feature_suggestions/{suggestionId}": {
+      "schema": "FeatureSuggestion",
+      "description": "Hòm thư góp ý tính năng gửi cho Admin"
+    },
+    "/week_locks/{lockId}": {
+      "schema": "WeekLockConfig",
+      "description": "Cấu hình khóa sổ thi đua hàng tuần"
+    },
+    "/parent_doc_configs/{reqId}": {
+      "schema": "ParentDocRequirement",
+      "description": "Danh mục hồ sơ yêu cầu PHHS nộp"
+    },
+    "/parent_submissions/{subId}": {
+      "schema": "ParentSubmission",
+      "description": "Bản ghi hồ sơ nộp từ PHHS"
+    },
+    "/student_confessions/{confId}": {
+      "schema": "StudentConfession",
+      "description": "Bảng tin tâm sự của học sinh"
+    },
+    "/system_settings/{docId}": {
+      "schema": "SchoolSystemConfig",
+      "description": "Cấu hình chung toàn trường"
+    },
+    "/supplemental_score_requests/{requestId}": {
+      "schema": "SupplementalScoreRequest",
+      "description": "Đơn xin phép nhập điểm bổ sung của các tổ trưởng chờ Admin/GVCN/Lớp trưởng duyệt"
+    }
+  }
+}
