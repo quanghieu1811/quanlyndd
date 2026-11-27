@@ -168,12 +168,25 @@ export const ParentSubmissionDeskView: React.FC<ParentSubmissionDeskViewProps> =
         }),
       });
 
-      const resData = await resp.json().catch(() => null);
+      const rawRespText = await resp.text().catch(() => '');
+      let resData: any = null;
+      if (rawRespText.trim()) {
+        try {
+          resData = JSON.parse(rawRespText);
+        } catch {
+          resData = null;
+        }
+      }
       if (!resp.ok || !resData?.success) {
         const baseMsg =
           resData?.error || 'Trợ lí AI đang trục trặc, vui lòng quay lại sau giây lát.';
-        const detailSuffix = resData?.errorDetail
-          ? `\nChi tiết lỗi từ Gemma: ${resData.errorDetail}`
+        const fallbackBody =
+          !resData?.errorDetail && rawRespText.trim()
+            ? `[HTTP ${resp.status}] ${rawRespText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600)}`
+            : '';
+        const detailText = resData?.errorDetail || fallbackBody;
+        const detailSuffix = detailText
+          ? `\nNội dung lỗi chi tiết từ Gemma: ${detailText}`
           : '';
         throw new Error(`${baseMsg}${detailSuffix}`);
       }

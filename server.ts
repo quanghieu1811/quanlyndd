@@ -25,48 +25,218 @@ function getServerGeminiClient(): GoogleGenAI | null {
 const PRIMARY_MODEL = 'gemma-4-31b-it';
 const SECONDARY_MODEL = 'gemma-4-26b-a4b-it';
 
+function parseEmbeddedErrorPayload(raw: string): any | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Handle prefixed messages like: `got status: UNAVAILABLE. {"error":{...}}` or `[{"error":{...}}]`
+    const firstObj = trimmed.indexOf('{');
+    const lastObj = trimmed.lastIndexOf('}');
+    const firstArr = trimmed.indexOf('[');
+    const lastArr = trimmed.lastIndexOf(']');
+
+    const candidates: string[] = [];
+    if (firstArr !== -1 && lastArr > firstArr && (firstObj === -1 || firstArr < firstObj)) {
+      candidates.push(trimmed.slice(firstArr, lastArr + 1));
+    }
+    if (firstObj !== -1 && lastObj > firstObj) {
+      candidates.push(trimmed.slice(firstObj, lastObj + 1));
+    }
+
+    for (const candidate of candidates) {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // Ignore invalid slice
+      }
+    }
+    return null;
+  }
+}
+
+function formatGoogleApiErrorObject(errObj: any, depth = 0): { status?: number; parts: string[] } {
+  if (!errObj || typeof errObj !== 'object' || depth > 4) {
+    return { parts: [] };
+  }
+
+  const target = Array.isArray(errObj) ? errObj[0] : errObj;
+  if (!target || typeof target !== 'object') {
+    return { parts: [] };
+  }
+
+  const nested = target.error && typeof target.error === 'object' ? target.error : target;
+  const status =
+    typeof nested.code === 'number'
+      ? nested.code
+      : typeof nested.statusCode === 'number'
+      ? nested.statusCode
+      : typeof nested.status === 'number'
+      ? nested.status
+      : undefined;
+
+  const parts: string[] = [];
+  const statusName = typeof nested.status === 'string' ? nested.status.trim() : '';
+  const msg = typeof nested.message === 'string' ? nested.message.trim() : '';
+
+  if (statusName && msg) {
+    parts.push(`${statusName}: ${msg}`);
+  } else if (msg) {
+    parts.push(msg);
+  } else if (statusName) {
+    parts.push(statusName);
+  }
+
+  if (Array.isArray(nested.details) && nested.details.length > 0) {
+    const detailLines = nested.details
+      .map((d: any) => {
+        if (!d || typeof d !== 'object') return String(d);
+        const reasonBits: string[] = [];
+        if (d.reason) reasonBits.push(`reason=${d.reason}`);
+        if (d.domain) reasonBits.push(`domain=${d.domain}`);
+        if (d.message) reasonBits.push(d.message);
+        if (Array.isArray(d.fieldViolations) && d.fieldViolations.length > 0) {
+          reasonBits.push(
+            d.fieldViolations
+              .map((fv: any) => `${fv.field || 'field'}: ${fv.description || ''}`.trim())
+              .join('; ')
+          );
+        }
+        if (Array.isArray(d.violations) && d.violations.length > 0) {
+          reasonBits.push(
+            d.violations
+              .map((v: any) => v.description || v.quotaMetric || JSON.stringify(v))
+              .join('; ')
+          );
+        }
+        if (d.metadata && typeof d.metadata === 'object' && Object.keys(d.metadata).length > 0) {
+          reasonBits.push(JSON.stringify(d.metadata));
+        }
+        return reasonBits.length > 0 ? reasonBits.join(' | ') : JSON.stringify(d);
+      })
+      .filter(Boolean);
+    if (detailLines.length > 0) {
+      parts.push(`Chi tiết bổ sung: ${detailLines.join(' ; ')}`);
+    }
+  }
+
+  return { status, parts };
+}
+
 function extractErrorDetails(err: unknown): { status?: number; message: string } {
   if (!err) return { message: 'Lỗi không xác định từ mô hình AI.' };
 
   let status: number | undefined;
-  let message = '';
+  const collectedParts: string[] = [];
+
+  const collectFromString = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const parsed = parseEmbeddedErrorPayload(trimmed);
+    if (parsed) {
+      const formatted = formatGoogleApiErrorObject(parsed);
+      if (!status && formatted.status) status = formatted.status;
+      if (formatted.parts.length > 0) {
+        collectedParts.push(...formatted.parts);
+        return;
+      }
+    }
+    collectedParts.push(trimmed);
+  };
 
   if (typeof err === 'string') {
-    message = err;
+    collectFromString(err);
   } else if (typeof err === 'object') {
     const e = err as Record<string, any>;
     if (typeof e.status === 'number') status = e.status;
     else if (typeof e.code === 'number') status = e.code;
     else if (typeof e.statusCode === 'number') status = e.statusCode;
 
-    message = typeof e.message === 'string' ? e.message : String(err);
+    if (typeof e.message === 'string' && e.message.trim()) {
+      collectFromString(e.message);
+    }
 
-    // @google/genai sometimes embeds JSON inside err.message
-    const trimmed = message.trim();
-    if (trimmed.startsWith('{')) {
+    if (e.error && typeof e.error === 'object') {
+      const formatted = formatGoogleApiErrorObject(e.error);
+      if (!status && formatted.status) status = formatted.status;
+      collectedParts.push(...formatted.parts);
+    }
+
+    if (typeof e.body === 'string' && e.body.trim()) {
+      collectFromString(e.body);
+    } else if (e.body && typeof e.body === 'object') {
+      const formatted = formatGoogleApiErrorObject(e.body);
+      if (!status && formatted.status) status = formatted.status;
+      collectedParts.push(...formatted.parts);
+    }
+
+    if (e.response?.data) {
+      if (typeof e.response.data === 'string') {
+        collectFromString(e.response.data);
+      } else {
+        const formatted = formatGoogleApiErrorObject(e.response.data);
+        if (!status && formatted.status) status = formatted.status;
+        collectedParts.push(...formatted.parts);
+      }
+    }
+
+    if (e.cause) {
+      const causeDetails = extractErrorDetails(e.cause);
+      if (!status && causeDetails.status) status = causeDetails.status;
+      if (causeDetails.message && causeDetails.message !== 'Lỗi không xác định từ mô hình AI.') {
+        collectedParts.push(`Nguyên nhân gốc: ${causeDetails.message}`);
+      }
+    }
+
+    if (collectedParts.length === 0) {
       try {
-        const parsed = JSON.parse(trimmed);
-        const nestedErr = parsed?.error || parsed;
-        if (typeof nestedErr?.code === 'number' && !status) {
-          status = nestedErr.code;
-        }
-        if (typeof nestedErr?.message === 'string') {
-          message = nestedErr.status
-            ? `${nestedErr.status}: ${nestedErr.message}`
-            : nestedErr.message;
+        const serialized = JSON.stringify(e);
+        if (serialized && serialized !== '{}') {
+          collectFromString(serialized);
         }
       } catch {
-        // Keep raw message if not JSON
+        collectedParts.push(String(err));
       }
     }
   } else {
-    message = String(err);
+    collectedParts.push(String(err));
+  }
+
+  // Deduplicate exact repeated parts while preserving order
+  const uniqueParts: string[] = [];
+  for (const part of collectedParts) {
+    const normalized = part.trim();
+    if (normalized && !uniqueParts.includes(normalized)) {
+      uniqueParts.push(normalized);
+    }
   }
 
   return {
     status,
-    message: message.trim() || 'Lỗi không xác định từ mô hình AI.',
+    message: uniqueParts.join('\n') || 'Lỗi không xác định từ mô hình AI.',
   };
+}
+
+function describeEmptyGenAiResponse(response: any, modelName: string): string {
+  const blockReason = response?.promptFeedback?.blockReason;
+  const blockMsg = response?.promptFeedback?.blockReasonMessage;
+  const candidate = response?.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+  const finishMessage = candidate?.finishMessage;
+
+  const reasons: string[] = [];
+  if (blockReason) {
+    reasons.push(`blockReason=${blockReason}${blockMsg ? ` (${blockMsg})` : ''}`);
+  }
+  if (finishReason && finishReason !== 'STOP') {
+    reasons.push(`finishReason=${finishReason}${finishMessage ? ` (${finishMessage})` : ''}`);
+  }
+  if (reasons.length > 0) {
+    return `Mô hình ${modelName} không trả về văn bản (${reasons.join('; ')}).`;
+  }
+  return `Mô hình ${modelName} trả về phản hồi trống.`;
 }
 
 function isNonRetryableGemmaError(err: unknown): boolean {
@@ -98,13 +268,19 @@ function isAuthKeyError(err: unknown): boolean {
 
 function formatGemmaError(
   err: unknown,
-  modelName?: string
+  modelName?: string,
+  extraAttempts?: string[]
 ): { statusCode: number; userMessage: string; rawDetail: string } {
   const { status, message } = extractErrorDetails(err);
   const lower = message.toLowerCase();
   const statusTag = status ? `[HTTP ${status}] ` : '';
   const modelTag = modelName ? `(${modelName}) ` : '';
-  const rawDetail = `${statusTag}${modelTag}${message}`.trim();
+  const primaryDetail = `${statusTag}${modelTag}${message}`.trim();
+  const extraBlock =
+    extraAttempts && extraAttempts.length > 0
+      ? `\n\nChi tiết các lần thử trước:\n- ${extraAttempts.join('\n- ')}`
+      : '';
+  const rawDetail = `${primaryDetail}${extraBlock}`.trim();
 
   if (
     status === 429 ||
@@ -860,6 +1036,7 @@ Hãy phản hồi DUY NHẤT dưới dạng JSON thuần (không thêm markdown 
     let ocrResult: any = null;
     let lastOcrError: unknown = null;
     let lastOcrModel = PRIMARY_MODEL;
+    const ocrFailedAttempts: string[] = [];
     const modelsToTry = [PRIMARY_MODEL, SECONDARY_MODEL];
 
     for (const modelName of modelsToTry) {
@@ -875,13 +1052,17 @@ Hãy phản hồi DUY NHẤT dưới dạng JSON thuần (không thêm markdown 
           ocrResult = parsed;
           break;
         }
-        lastOcrError = new Error(
-          response.text
-            ? `Mô hình ${modelName} trả về nội dung không đúng định dạng JSON OCR.`
-            : `Mô hình ${modelName} trả về phản hồi trống.`
-        );
+        const emptyMsg = response.text
+          ? `Mô hình ${modelName} trả về nội dung không đúng định dạng JSON OCR: ${response.text.slice(0, 240)}`
+          : describeEmptyGenAiResponse(response, modelName);
+        lastOcrError = new Error(emptyMsg);
+        ocrFailedAttempts.push(`(${modelName}) ${emptyMsg}`);
       } catch (genAiErr) {
         lastOcrError = genAiErr;
+        const details = extractErrorDetails(genAiErr);
+        ocrFailedAttempts.push(
+          `${details.status ? `[HTTP ${details.status}] ` : ''}(${modelName}) ${details.message}`
+        );
         console.warn(`Gemma OCR generation error (${modelName}):`, genAiErr);
         if (isAuthKeyError(genAiErr)) {
           break;
@@ -890,9 +1071,11 @@ Hãy phản hồi DUY NHẤT dưới dạng JSON thuần (không thêm markdown 
     }
 
     if (!ocrResult) {
+      const priorAttempts = ocrFailedAttempts.slice(0, -1);
       const formatted = formatGemmaError(
         lastOcrError || new Error('Không nhận được kết quả OCR từ mô hình Gemma.'),
-        lastOcrModel
+        lastOcrModel,
+        priorAttempts
       );
       res.status(formatted.statusCode).json({
         success: false,
@@ -1032,6 +1215,7 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
       let streamRes;
       let activeModel = PRIMARY_MODEL;
       let streamErr: unknown = null;
+      const streamAttemptErrors: string[] = [];
 
       try {
         streamRes = await client.models.generateContentStream({
@@ -1040,6 +1224,10 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
         });
       } catch (err) {
         streamErr = err;
+        const details = extractErrorDetails(err);
+        streamAttemptErrors.push(
+          `${details.status ? `[HTTP ${details.status}] ` : ''}(${PRIMARY_MODEL}) ${details.message}`
+        );
         console.warn(`Primary model ${PRIMARY_MODEL} failed, trying secondary ${SECONDARY_MODEL}...`, err);
         if (!isAuthKeyError(err)) {
           activeModel = SECONDARY_MODEL;
@@ -1056,7 +1244,7 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
       }
 
       if (!streamRes || streamErr) {
-        const formatted = formatGemmaError(streamErr, activeModel);
+        const formatted = formatGemmaError(streamErr, activeModel, streamAttemptErrors);
         res.write(
           `data: ${JSON.stringify({
             error: formatted.userMessage,
@@ -1075,7 +1263,7 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
           }
         }
       } catch (chunkErr) {
-        const formatted = formatGemmaError(chunkErr, activeModel);
+        const formatted = formatGemmaError(chunkErr, activeModel, streamAttemptErrors);
         res.write(
           `data: ${JSON.stringify({
             error: formatted.userMessage,
@@ -1091,9 +1279,10 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
     let replyText = '';
     let lastError: unknown = null;
     let lastModel = PRIMARY_MODEL;
+    const failedAttempts: string[] = [];
 
-    // Step 1: Retry loop (3 attempts) for PRIMARY_MODEL
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    // Step 1: Try PRIMARY_MODEL (up to 2 attempts to avoid long gateway timeouts on overloaded models)
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         lastModel = PRIMARY_MODEL;
         const response = await client.models.generateContent({
@@ -1104,22 +1293,28 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
           replyText = response.text;
           break;
         }
-        lastError = new Error(`Mô hình ${PRIMARY_MODEL} trả về phản hồi trống.`);
+        const emptyDesc = describeEmptyGenAiResponse(response, PRIMARY_MODEL);
+        lastError = new Error(emptyDesc);
+        failedAttempts.push(`(${PRIMARY_MODEL} lần ${attempt}) ${emptyDesc}`);
       } catch (err: any) {
         lastError = err;
+        const details = extractErrorDetails(err);
+        failedAttempts.push(
+          `${details.status ? `[HTTP ${details.status}] ` : ''}(${PRIMARY_MODEL} lần ${attempt}) ${details.message}`
+        );
         console.warn(`Gemma error (${PRIMARY_MODEL}, attempt ${attempt}):`, err);
         if (isNonRetryableGemmaError(err)) {
           break;
         }
-        if (attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
         }
       }
     }
 
     // Step 2: If PRIMARY_MODEL fails (and not an invalid API key error), try SECONDARY_MODEL
     if (!replyText && !isAuthKeyError(lastError)) {
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
         try {
           lastModel = SECONDARY_MODEL;
           const response = await client.models.generateContent({
@@ -1130,24 +1325,32 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
             replyText = response.text;
             break;
           }
-          lastError = new Error(`Mô hình ${SECONDARY_MODEL} trả về phản hồi trống.`);
+          const emptyDesc = describeEmptyGenAiResponse(response, SECONDARY_MODEL);
+          lastError = new Error(emptyDesc);
+          failedAttempts.push(`(${SECONDARY_MODEL} lần ${attempt}) ${emptyDesc}`);
         } catch (err: any) {
           lastError = err;
+          const details = extractErrorDetails(err);
+          failedAttempts.push(
+            `${details.status ? `[HTTP ${details.status}] ` : ''}(${SECONDARY_MODEL} lần ${attempt}) ${details.message}`
+          );
           console.warn(`Gemma error (${SECONDARY_MODEL}, attempt ${attempt}):`, err);
           if (isNonRetryableGemmaError(err)) {
             break;
           }
-          if (attempt < 3) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 400));
           }
         }
       }
     }
 
     if (!replyText) {
+      const priorAttempts = failedAttempts.slice(0, -1);
       const formatted = formatGemmaError(
         lastError || new Error('Mô hình không trả về nội dung phản hồi.'),
-        lastModel
+        lastModel,
+        priorAttempts
       );
       res.status(formatted.statusCode).json({
         error: formatted.userMessage,
@@ -1170,6 +1373,17 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
       errorDetail: formatted.rawDetail,
     });
   }
+});
+
+// Ensure /api/* Express middleware errors (e.g. PayloadTooLargeError, malformed JSON) always return JSON errorDetail
+app.use('/api', (err: any, _req: Request, res: Response, _next: express.NextFunction) => {
+  console.error('Unhandled /api middleware error:', err);
+  const formatted = formatGemmaError(err);
+  const status = typeof err?.status === 'number' && err.status >= 400 ? err.status : formatted.statusCode;
+  res.status(status).json({
+    error: formatted.userMessage,
+    errorDetail: formatted.rawDetail,
+  });
 });
 
 async function startServer() {

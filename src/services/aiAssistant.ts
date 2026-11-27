@@ -1423,7 +1423,15 @@ export async function sendAiAssistantMessage(
     );
   }
 
-  const result = await response.json().catch(() => null);
+  const rawBodyText = await response.text().catch(() => '');
+  let result: any = null;
+  if (rawBodyText && rawBodyText.trim().length > 0) {
+    try {
+      result = JSON.parse(rawBodyText);
+    } catch {
+      result = null;
+    }
+  }
 
   if (!response.ok || result?.error) {
     const userMessage =
@@ -1434,10 +1442,24 @@ export async function sendAiAssistantMessage(
     if (result?.model) {
       parts.push(`\n**Mô hình:** \`${result.model}\``);
     }
-    if (result?.errorDetail) {
-      parts.push(`**Chi tiết lỗi từ Gemma:** \`${result.errorDetail}\``);
+
+    let detailText = '';
+    if (typeof result?.errorDetail === 'string' && result.errorDetail.trim().length > 0) {
+      detailText = result.errorDetail.trim();
+    } else if (typeof result?.message === 'string' && result.message.trim().length > 0) {
+      detailText = result.message.trim();
+    } else if (rawBodyText && rawBodyText.trim().length > 0) {
+      const cleanedBody = rawBodyText.trim().startsWith('<')
+        ? rawBodyText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        : rawBodyText.trim();
+      detailText = `[HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}] ${cleanedBody.slice(0, 1200)}`;
     } else if (!response.ok) {
-      parts.push(`**Mã lỗi HTTP:** \`${response.status} ${response.statusText || ''}\``.trim());
+      detailText = `[HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}] Máy chủ không trả về nội dung chi tiết.`;
+    }
+
+    if (detailText) {
+      const safeDetail = detailText.replace(/```/g, "'''");
+      parts.push(`**Nội dung lỗi chi tiết từ Gemma:**\n\`\`\`\n${safeDetail}\n\`\`\``);
     }
     throw new Error(parts.join('\n'));
   }

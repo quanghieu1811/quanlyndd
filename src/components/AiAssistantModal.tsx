@@ -574,50 +574,72 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
  * Basic markdown styling formatter for assistant responses
  */
 function formatMessageContent(text: string) {
-  const lines = text.split('\n');
-  return lines.map((line, idx) => {
-    // Process markdown headers
-    if (line.startsWith('### ')) {
-      return (
-        <h4 key={idx} className="font-bold text-slate-900 dark:text-white mt-2 mb-1">
-          {renderFormattedInline(line.replace('### ', ''))}
-        </h4>
+  const segments = text.split(/(```[\s\S]*?```)/g);
+  const elements: React.ReactNode[] = [];
+
+  segments.forEach((segment, segIdx) => {
+    if (segment.startsWith('```') && segment.endsWith('```') && segment.length >= 6) {
+      const codeBody = segment.slice(3, -3).replace(/^\w*\n/, '').trim();
+      elements.push(
+        <pre
+          key={`code-${segIdx}`}
+          className="mt-1.5 mb-1 p-2.5 rounded-xl bg-black/5 dark:bg-black/30 border border-black/10 dark:border-white/10 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words overflow-x-auto"
+        >
+          {codeBody}
+        </pre>
       );
+      return;
     }
-    if (line.startsWith('## ')) {
-      return (
-        <h3 key={idx} className="font-extrabold text-base text-blue-700 dark:text-blue-400 mt-2 mb-1">
-          {renderFormattedInline(line.replace('## ', ''))}
-        </h3>
-      );
-    }
-    // Bullet points
-    if (line.startsWith('- ') || line.startsWith('* ')) {
-      return (
-        <div key={idx} className="flex items-start gap-1.5 ml-1 my-0.5">
-          <span className="text-blue-500 font-bold">•</span>
-          <span className="flex-1">{renderFormattedInline(line.substring(2))}</span>
-        </div>
-      );
-    }
-    // Numbered list
-    const numMatch = line.match(/^(\d+)\.\s(.*)/);
-    if (numMatch) {
-      return (
-        <div key={idx} className="flex items-start gap-1.5 ml-1 my-0.5">
-          <span className="font-bold text-blue-600 dark:text-blue-400 min-w-4 text-right">
-            {numMatch[1]}.
-          </span>
-          <span className="flex-1">{renderFormattedInline(numMatch[2])}</span>
-        </div>
-      );
-    }
-    // Standard paragraph or empty line
-    if (!line.trim()) {
-      return <div key={idx} className="h-1.5" />;
-    }
-    return <div key={idx}>{renderFormattedInline(line)}</div>;
+
+    const lines = segment.split('\n');
+    lines.forEach((line, idx) => {
+      const key = `${segIdx}-${idx}`;
+      if (line.startsWith('### ')) {
+        elements.push(
+          <h4 key={key} className="font-bold text-slate-900 dark:text-white mt-2 mb-1">
+            {renderFormattedInline(line.replace('### ', ''))}
+          </h4>
+        );
+        return;
+      }
+      if (line.startsWith('## ')) {
+        elements.push(
+          <h3 key={key} className="font-extrabold text-base text-blue-700 dark:text-blue-400 mt-2 mb-1">
+            {renderFormattedInline(line.replace('## ', ''))}
+          </h3>
+        );
+        return;
+      }
+      if (line.startsWith('- ') || line.startsWith('* ')) {
+        elements.push(
+          <div key={key} className="flex items-start gap-1.5 ml-1 my-0.5">
+            <span className="text-blue-500 font-bold">•</span>
+            <span className="flex-1">{renderFormattedInline(line.substring(2))}</span>
+          </div>
+        );
+        return;
+      }
+      const numMatch = line.match(/^(\d+)\.\s(.*)/);
+      if (numMatch) {
+        elements.push(
+          <div key={key} className="flex items-start gap-1.5 ml-1 my-0.5">
+            <span className="font-bold text-blue-600 dark:text-blue-400 min-w-4 text-right">
+              {numMatch[1]}.
+            </span>
+            <span className="flex-1">{renderFormattedInline(numMatch[2])}</span>
+          </div>
+        );
+        return;
+      }
+      if (!line.trim()) {
+        elements.push(<div key={key} className="h-1.5" />);
+        return;
+      }
+      elements.push(<div key={key}>{renderFormattedInline(line)}</div>);
+    });
   });
+
+  return elements;
 }
 
 function renderFormattedInline(str: string) {
