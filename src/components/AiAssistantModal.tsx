@@ -224,6 +224,8 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         rules,
         systemConfig,
         selectedClass,
+        query: text,
+        history: messages,
       });
 
       const reply = await sendAiAssistantMessage(
@@ -253,8 +255,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           msg.id === botMessageId
             ? {
                 ...msg,
-                text: `⚠️ **Không thể kết nối trợ lý:** ${
-                  err?.message || 'Có lỗi xảy ra. Vui lòng thử lại sau.'
+                isError: true,
+                text: `⚠️ ${
+                  err?.message || 'Trợ lí AI đang trục trặc, vui lòng quay lại sau giây lát.'
                 }`,
               }
             : msg
@@ -419,8 +422,18 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                 className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}
               >
                 {!isUser && (
-                  <div className="w-8 h-8 rounded-xl bg-linear-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs mt-1">
-                    <Bot className="w-4 h-4" />
+                  <div
+                    className={`w-8 h-8 rounded-xl text-white flex items-center justify-center shrink-0 shadow-xs mt-1 ${
+                      msg.isError
+                        ? 'bg-linear-to-br from-rose-500 to-red-600'
+                        : 'bg-linear-to-br from-blue-600 to-indigo-600'
+                    }`}
+                  >
+                    {msg.isError ? (
+                      <AlertCircle className="w-4 h-4" />
+                    ) : (
+                      <Bot className="w-4 h-4" />
+                    )}
                   </div>
                 )}
 
@@ -428,6 +441,8 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                   className={`max-w-[85%] rounded-2xl p-3.5 text-sm leading-relaxed shadow-xs relative group ${
                     isUser
                       ? 'bg-blue-600 text-white rounded-tr-xs'
+                      : msg.isError
+                      ? 'bg-rose-50 dark:bg-rose-950/40 text-rose-900 dark:text-rose-100 border border-rose-200 dark:border-rose-800 rounded-tl-xs'
                       : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 rounded-tl-xs'
                   }`}
                 >
@@ -606,14 +621,24 @@ function formatMessageContent(text: string) {
 }
 
 function renderFormattedInline(str: string) {
-  // Split on bold markdown **...**
-  const parts = str.split(/(\*\*.*?\*\*)/g);
+  // Split on bold **...** or inline code `...`
+  const parts = str.split(/(\*\*.*?\*\*|`[^`]+`)/g);
   return parts.map((part, i) => {
-    if (part.startsWith('**') && part.endsWith('**')) {
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       return (
         <strong key={i} className="font-bold text-slate-900 dark:text-white">
           {part.slice(2, -2)}
         </strong>
+      );
+    }
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code
+          key={i}
+          className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[12px] break-all"
+        >
+          {part.slice(1, -1)}
+        </code>
       );
     }
     // Italic markdown *...*

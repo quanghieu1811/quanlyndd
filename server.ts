@@ -9,9 +9,7 @@ dotenv.config();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 function getServerGeminiClient(): GoogleGenAI | null {
-  const apiKey =
-    process.env.GEMINI_API_KEY?.trim() ||
-    process.env.VITE_GEMINI_API_KEY?.trim();
+  const apiKey = process.env.VITE_GEMINI_API_KEY?.trim();
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
@@ -26,6 +24,175 @@ function getServerGeminiClient(): GoogleGenAI | null {
 // Internal model selection strictly per requirement:
 const PRIMARY_MODEL = 'gemma-4-31b-it';
 const SECONDARY_MODEL = 'gemma-4-26b-a4b-it';
+
+function extractErrorDetails(err: unknown): { status?: number; message: string } {
+  if (!err) return { message: 'Lỗi không xác định từ mô hình AI.' };
+
+  let status: number | undefined;
+  let message = '';
+
+  if (typeof err === 'string') {
+    message = err;
+  } else if (typeof err === 'object') {
+    const e = err as Record<string, any>;
+    if (typeof e.status === 'number') status = e.status;
+    else if (typeof e.code === 'number') status = e.code;
+    else if (typeof e.statusCode === 'number') status = e.statusCode;
+
+    message = typeof e.message === 'string' ? e.message : String(err);
+
+    // @google/genai sometimes embeds JSON inside err.message
+    const trimmed = message.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const nestedErr = parsed?.error || parsed;
+        if (typeof nestedErr?.code === 'number' && !status) {
+          status = nestedErr.code;
+        }
+        if (typeof nestedErr?.message === 'string') {
+          message = nestedErr.status
+            ? `${nestedErr.status}: ${nestedErr.message}`
+            : nestedErr.message;
+        }
+      } catch {
+        // Keep raw message if not JSON
+      }
+    }
+  } else {
+    message = String(err);
+  }
+
+  return {
+    status,
+    message: message.trim() || 'Lỗi không xác định từ mô hình AI.',
+  };
+}
+
+function isNonRetryableGemmaError(err: unknown): boolean {
+  const { status, message } = extractErrorDetails(err);
+  if (status === 400 || status === 401 || status === 403 || status === 404) {
+    return true;
+  }
+  const upper = message.toUpperCase();
+  return (
+    upper.includes('INVALID_ARGUMENT') ||
+    upper.includes('API_KEY_INVALID') ||
+    upper.includes('API KEY NOT VALID') ||
+    upper.includes('PERMISSION_DENIED') ||
+    upper.includes('NOT_FOUND')
+  );
+}
+
+function isAuthKeyError(err: unknown): boolean {
+  const { status, message } = extractErrorDetails(err);
+  if (status === 401 || status === 403) return true;
+  const upper = message.toUpperCase();
+  return (
+    upper.includes('API_KEY_INVALID') ||
+    upper.includes('API KEY NOT VALID') ||
+    upper.includes('PERMISSION_DENIED') ||
+    upper.includes('UNAUTHORIZED')
+  );
+}
+
+function formatGemmaError(
+  err: unknown,
+  modelName?: string
+): { statusCode: number; userMessage: string; rawDetail: string } {
+  const { status, message } = extractErrorDetails(err);
+  const lower = message.toLowerCase();
+  const statusTag = status ? `[HTTP ${status}] ` : '';
+  const modelTag = modelName ? `(${modelName}) ` : '';
+  const rawDetail = `${statusTag}${modelTag}${message}`.trim();
+
+  if (
+    status === 429 ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests')
+  ) {
+    return {
+      statusCode: 429,
+      userMessage:
+        'Trợ lí AI đang quá tải hoặc đã vượt giới hạn lượt gọi tạm thời, vui lòng quay lại sau giây lát.',
+      rawDetail,
+    };
+  }
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('api key not valid') ||
+    lower.includes('permission_denied') ||
+    lower.includes('unauthorized') ||
+    lower.includes('forbidden')
+  ) {
+    return {
+      statusCode: 403,
+      userMessage:
+        'Trợ lí AI đang trục trặc do khóa API không hợp lệ hoặc không có quyền truy cập, vui lòng kiểm tra lại cấu hình.',
+      rawDetail,
+    };
+  }
+
+  if (
+    status === 404 ||
+    lower.includes('not_found') ||
+    lower.includes('is not found') ||
+    lower.includes('does not exist')
+  ) {
+    return {
+      statusCode: 404,
+      userMessage:
+        'Trợ lí AI đang trục trặc do không tìm thấy mô hình Gemma được cấu hình trên máy chủ.',
+      rawDetail,
+    };
+  }
+
+  if (
+    status === 400 ||
+    lower.includes('invalid_argument') ||
+    lower.includes('bad request') ||
+    lower.includes('safety') ||
+    lower.includes('blocked')
+  ) {
+    return {
+      statusCode: 400,
+      userMessage:
+        'Trợ lí AI không thể xử lý yêu cầu này do dữ liệu gửi lên không hợp lệ hoặc bị bộ lọc an toàn từ chối.',
+      rawDetail,
+    };
+  }
+
+  if (
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    lower.includes('unavailable') ||
+    lower.includes('overloaded') ||
+    lower.includes('deadline_exceeded') ||
+    lower.includes('timeout') ||
+    lower.includes('econnreset') ||
+    lower.includes('fetch failed')
+  ) {
+    return {
+      statusCode: 502,
+      userMessage:
+        'Trợ lí AI đang trục trặc hoặc máy chủ mô hình tạm gián đoạn, vui lòng quay lại sau giây lát.',
+      rawDetail,
+    };
+  }
+
+  return {
+    statusCode: 502,
+    userMessage: 'Trợ lí AI đang trục trặc, vui lòng quay lại sau giây lát.',
+    rawDetail,
+  };
+}
 
 interface ChatHistoryItem {
   role: 'user' | 'model';
@@ -73,6 +240,11 @@ interface AuthorizedDataContext {
     classId?: string;
   };
   groupSummary?: any;
+  groupSummaries?: any[];
+  studentSummaries?: any[];
+  weeklyOverview?: any[];
+  sliceMeta?: any;
+  hiddenWeeksRequested?: number[];
   studentPointsSummary?: {
     currentWeekPoints?: { plus: number; minus: number; total: number };
     allWeeksTotal?: number;
@@ -81,6 +253,7 @@ interface AuthorizedDataContext {
   };
   recentRecords?: Array<{
     week: number;
+    classId?: string;
     type: 'plus' | 'minus';
     points: number;
     ruleTitle: string;
@@ -97,6 +270,10 @@ interface AuthorizedDataContext {
     totalScore: number;
     rank: number;
   }>;
+  classes?: any[];
+  totalStudentsAcrossSchool?: number;
+  totalRecordsAcrossSchool?: number;
+  currentClassId?: string;
   privacyNotice?: string;
   currentWeekHidden?: boolean;
 }
@@ -141,6 +318,8 @@ function enforceDataIsolation(
     sanitized.studentInfo = data?.studentInfo;
     sanitized.studentPointsSummary = data?.studentPointsSummary;
     sanitized.currentWeekHidden = data?.currentWeekHidden;
+    sanitized.hiddenWeeksRequested = data?.hiddenWeeksRequested;
+    sanitized.sliceMeta = data?.sliceMeta;
 
     // Filter records: MUST only match this student explicitly
     if (data?.recentRecords && (scope.studentId || scope.studentName)) {
@@ -151,7 +330,6 @@ function enforceDataIsolation(
           Boolean(targetName && r?.studentName && r.studentName.trim().toLowerCase() === targetName)
       );
     }
-    // PHHS cannot see other students' ranking details, only generalized class rule context
     return sanitized;
   }
 
@@ -160,6 +338,18 @@ function enforceDataIsolation(
     sanitized.classInfo = data?.classInfo;
     sanitized.groupSummary = data?.groupSummary;
     sanitized.currentWeekHidden = data?.currentWeekHidden;
+    sanitized.hiddenWeeksRequested = data?.hiddenWeeksRequested;
+    sanitized.sliceMeta = data?.sliceMeta;
+    if (data?.groupSummaries) {
+      sanitized.groupSummaries = data.groupSummaries.filter(
+        (g) => g.group === scope.assignedGroup
+      );
+    }
+    if (data?.studentSummaries) {
+      sanitized.studentSummaries = data.studentSummaries.filter(
+        (s) => s.group === scope.assignedGroup
+      );
+    }
     if (data?.recentRecords) {
       sanitized.recentRecords = data.recentRecords.filter(
         (r) => r.group === scope.assignedGroup
@@ -174,6 +364,11 @@ function enforceDataIsolation(
     sanitized.classInfo = data?.classInfo;
     sanitized.classSummary = data?.classSummary;
     sanitized.groupSummary = data?.groupSummary;
+    sanitized.groupSummaries = data?.groupSummaries;
+    sanitized.studentSummaries = data?.studentSummaries;
+    sanitized.weeklyOverview = data?.weeklyOverview;
+    sanitized.sliceMeta = data?.sliceMeta;
+    sanitized.hiddenWeeksRequested = data?.hiddenWeeksRequested;
     sanitized.classRankingSummary = data?.classRankingSummary;
     sanitized.recentRecords = data?.recentRecords;
     sanitized.currentWeekHidden = data?.currentWeekHidden;
@@ -404,8 +599,8 @@ function synthesizeLocalResponse(
 }
 
 /**
- * Selective context pruner: only feeds required data fields to the AI model
- * based on user query intent, avoiding unnecessary data payload inflation.
+ * Selective context pruner: preserves 100% of already-dissected slices (never truncates
+ * matched records), and applies week/group slicing when called without client-side sliceMeta.
  */
 function pruneContextForQuery(
   message: string,
@@ -432,6 +627,11 @@ function pruneContextForQuery(
     };
   }
 
+  // If client already dissected data with sliceMeta, preserve all dissected fields & 100% of records!
+  if (safeData.sliceMeta) {
+    return safeData;
+  }
+
   const isRuleQuery =
     q.includes('muộn') ||
     q.includes('trễ') ||
@@ -455,8 +655,10 @@ function pruneContextForQuery(
     q.includes('góp ý') ||
     q.includes('minh chứng');
 
-  // If asking purely about rules or submission procedures, omit heavy student/class record dumps
-  if (isRuleQuery || isSubmissionQuery) {
+  const mentionsSpecificData =
+    /tuần\s*\d+|tổ\s*[1-4]|tình hình|ai bị|xếp hạng|sĩ số/.test(q);
+
+  if ((isRuleQuery || isSubmissionQuery) && !mentionsSpecificData) {
     return {
       schoolInfo: safeData.schoolInfo,
       rulesSummary: safeData.rulesSummary,
@@ -467,28 +669,40 @@ function pruneContextForQuery(
     };
   }
 
-  // If asking about student points / warnings / progress: include focused points summary
   const pruned: AuthorizedDataContext = {
     schoolInfo: safeData.schoolInfo,
+    rulesSummary: safeData.rulesSummary,
     classInfo: safeData.classInfo,
     studentInfo: safeData.studentInfo,
     studentPointsSummary: safeData.studentPointsSummary,
     groupSummary: safeData.groupSummary,
+    groupSummaries: safeData.groupSummaries,
+    studentSummaries: safeData.studentSummaries,
+    weeklyOverview: safeData.weeklyOverview,
     classSummary: safeData.classSummary,
+    classes: safeData.classes,
+    totalStudentsAcrossSchool: safeData.totalStudentsAcrossSchool,
+    totalRecordsAcrossSchool: safeData.totalRecordsAcrossSchool,
+    currentClassId: safeData.currentClassId,
     privacyNotice: safeData.privacyNotice,
     currentWeekHidden: safeData.currentWeekHidden,
+    hiddenWeeksRequested: safeData.hiddenWeeksRequested,
   };
 
-  // Include recent records (up to 30), prioritizing current week records
   if (safeData.recentRecords && safeData.recentRecords.length > 0) {
-    const curWeek = safeData.schoolInfo?.currentWeek;
-    if (curWeek) {
-      const curWeekRecords = safeData.recentRecords.filter((r) => r.week === curWeek);
-      const otherRecords = safeData.recentRecords.filter((r) => r.week !== curWeek);
-      pruned.recentRecords = [...curWeekRecords, ...otherRecords].slice(0, 30);
-    } else {
-      pruned.recentRecords = safeData.recentRecords.slice(0, 30);
+    let filtered = safeData.recentRecords;
+    const weekMatch = q.match(/tuần\s*(\d{1,2})/);
+    const groupMatch = q.match(/tổ\s*([1-4])/);
+    if (weekMatch) {
+      const reqWeek = parseInt(weekMatch[1], 10);
+      filtered = filtered.filter((r) => r.week === reqWeek);
     }
+    if (groupMatch) {
+      const reqGroup = parseInt(groupMatch[1], 10);
+      filtered = filtered.filter((r) => r.group === reqGroup);
+    }
+    // Keep 100% of all matched records without arbitrary truncation
+    pruned.recentRecords = filtered;
   }
 
   return pruned;
@@ -633,50 +847,74 @@ Hãy phản hồi DUY NHẤT dưới dạng JSON thuần (không thêm markdown 
 
     const client = getServerGeminiClient();
 
-    let ocrResult: any = null;
-    if (client) {
-      const modelsToTry = [PRIMARY_MODEL, SECONDARY_MODEL];
-      for (const modelName of modelsToTry) {
-        try {
-          const response = await client.models.generateContent({
-            model: modelName,
-            contents: { parts: [imagePart, { text: promptText }] },
-          });
+    if (!client) {
+      res.status(503).json({
+        success: false,
+        error:
+          'Trợ lí AI đang trục trặc do hệ thống chưa được cấu hình khóa API (VITE_GEMINI_API_KEY).',
+        errorDetail: 'Missing VITE_GEMINI_API_KEY on server.',
+      });
+      return;
+    }
 
-          const parsed = parseJsonSafe(response.text);
-          if (parsed) {
-            ocrResult = parsed;
-            break;
-          }
-        } catch (genAiErr) {
-          console.warn(`Gemma OCR generation error (${modelName}):`, genAiErr);
+    let ocrResult: any = null;
+    let lastOcrError: unknown = null;
+    let lastOcrModel = PRIMARY_MODEL;
+    const modelsToTry = [PRIMARY_MODEL, SECONDARY_MODEL];
+
+    for (const modelName of modelsToTry) {
+      lastOcrModel = modelName;
+      try {
+        const response = await client.models.generateContent({
+          model: modelName,
+          contents: { parts: [imagePart, { text: promptText }] },
+        });
+
+        const parsed = parseJsonSafe(response.text);
+        if (parsed) {
+          ocrResult = parsed;
+          break;
+        }
+        lastOcrError = new Error(
+          response.text
+            ? `Mô hình ${modelName} trả về nội dung không đúng định dạng JSON OCR.`
+            : `Mô hình ${modelName} trả về phản hồi trống.`
+        );
+      } catch (genAiErr) {
+        lastOcrError = genAiErr;
+        console.warn(`Gemma OCR generation error (${modelName}):`, genAiErr);
+        if (isAuthKeyError(genAiErr)) {
+          break;
         }
       }
-    } else {
-      console.warn('Neither GEMINI_API_KEY nor VITE_GEMINI_API_KEY is configured for /api/ocr-document.');
     }
 
     if (!ocrResult) {
-      ocrResult = {
-        detectedStudentName: '',
-        matchedStudentId: '',
-        parentName: '',
-        parentPhone: '',
-        documentType: 'Đơn từ / Minh chứng',
-        documentDate: new Date().toLocaleDateString('vi-VN'),
-        reasonOrSummary: 'Đã đính kèm ảnh chụp tài liệu minh chứng.',
-        fullText: 'Tài liệu đã được tải lên thành công.',
-      };
+      const formatted = formatGemmaError(
+        lastOcrError || new Error('Không nhận được kết quả OCR từ mô hình Gemma.'),
+        lastOcrModel
+      );
+      res.status(formatted.statusCode).json({
+        success: false,
+        error: formatted.userMessage,
+        errorDetail: formatted.rawDetail,
+        model: lastOcrModel,
+      });
+      return;
     }
 
     res.json({
       success: true,
       data: ocrResult,
+      model: lastOcrModel,
     });
   } catch (err: any) {
     console.error('Error in /api/ocr-document:', err);
-    res.status(500).json({
-      error: 'Không thể phân tích ảnh bằng OCR: ' + (err.message || ''),
+    const formatted = formatGemmaError(err);
+    res.status(formatted.statusCode).json({
+      success: false,
+      error: formatted.userMessage,
+      errorDetail: formatted.rawDetail,
     });
   }
 });
@@ -719,6 +957,11 @@ app.post('/api/ai-assistant', async (req: Request, res: Response) => {
       permissionScopeText = `QUYỀN RIÊNG TƯ TUYỆT ĐỐI: Đây là Phụ huynh của em "${scope.studentName || ''}" (ID: ${scope.studentId || ''}). PHỤ HUYNH CHỈ ĐƯỢC XEM DỮ LIỆU ĐIỂM, LỖI VI PHẠM, THƯỞNG VÀ XẾP HẠNG CỦA CON MÌNH (${scope.studentName}). TUYỆT ĐỐI KHÔNG tiết lộ điểm số hay lỗi vi phạm của bất kỳ học sinh nào khác. Nếu phụ huynh hỏi về học sinh khác, hãy lịch sự từ chối vì lý do bảo mật và bảo vệ quyền riêng tư học đường.`;
     }
 
+    const hiddenWeeksNote =
+      Array.isArray(safeData.hiddenWeeksRequested) && safeData.hiddenWeeksRequested.length > 0
+        ? `\n- CHÚ Ý TUẦN BỊ ẨN: Tuần ${safeData.hiddenWeeksRequested.join(', ')} hiện đang được GVCN/Admin tạm ẩn đối với vai trò này; hãy thông báo lịch sự rằng tuần đó đang tạm ẩn thay vì nói không có vi phạm/dữ liệu.`
+        : '';
+
     const privacyRuleNote = safeData.privacyNotice
       ? `\n- CHÚ Ý BẢO MẬT: ${safeData.privacyNotice} TUYỆT ĐỐI KHÔNG suy đoán hoặc bịa đặt điểm số hay xếp hạng.`
       : safeData.currentWeekHidden
@@ -734,9 +977,10 @@ PONG CÁCH GIAO TIẾP (RẤT QUAN TRỌNG):
 - Khi nhận xét về lỗi vi phạm của học sinh: Hãy đưa ra nhận xét ân cần, đồng hành, mang tính giáo dục tích cực và động viên các em cố gắng hơn.
 - Trình bày mạch lạc, sinh động bằng Markdown, dùng các icon biểu cảm phù hợp (👋, 🌸, ⭐, ⏰, 🧣, 👔, 🚩, ⚠️, 🎉).
 
-QUY TẮC BẢO MẬT & PHÂN QUYỀN (RẤT QUAN TRỌNG):
+QUY TẮC BẢO MẬT, PHÂN QUYỀN & PHẠM VI DỮ LIỆU (RẤT QUAN TRỌNG):
 - Người dùng hiện tại: ${roleDescription}
-- Phạm vi phân quyền: ${permissionScopeText}${privacyRuleNote}
+- Phạm vi phân quyền: ${permissionScopeText}${privacyRuleNote}${hiddenWeeksNote}
+- Dữ liệu trong JSON bên dưới đã được mổ xẻ đúng theo phạm vi câu hỏi và chứa ĐẦY ĐỦ 100% các bản ghi phù hợp (xem trường sliceMeta nếu có). Hãy thống kê, liệt kê đầy đủ và chính xác dựa trên toàn bộ dữ liệu này, không tự ý bịa thêm số liệu ngoài phạm vi.
 - Dữ liệu có sẵn cho phiên làm việc này:
 ${JSON.stringify(prunedData, null, 2)}`;
 
@@ -763,19 +1007,20 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
     const client = getServerGeminiClient();
 
     if (!client) {
-      const fallback = synthesizeLocalResponse(message, scope, safeData);
+      const missingKeyPayload = {
+        error:
+          'Trợ lí AI đang trục trặc do hệ thống chưa được cấu hình khóa API (VITE_GEMINI_API_KEY).',
+        errorDetail: 'Missing VITE_GEMINI_API_KEY on server.',
+      };
       if (stream) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
-        res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
+        res.write(`data: ${JSON.stringify(missingKeyPayload)}\n\n`);
         res.end();
         return;
       }
-      res.json({
-        reply: fallback,
-        userRole: scope.role || 'guest',
-      });
+      res.status(503).json(missingKeyPayload);
       return;
     }
 
@@ -785,67 +1030,113 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
       res.setHeader('Connection', 'keep-alive');
 
       let streamRes;
+      let activeModel = PRIMARY_MODEL;
+      let streamErr: unknown = null;
+
       try {
         streamRes = await client.models.generateContentStream({
           model: PRIMARY_MODEL,
           contents: fullPromptString,
         });
       } catch (err) {
-        console.warn(`Primary model ${PRIMARY_MODEL} failed, trying secondary ${SECONDARY_MODEL}...`);
-        try {
-          streamRes = await client.models.generateContentStream({
-            model: SECONDARY_MODEL,
-            contents: fullPromptString,
-          });
-        } catch (innerErr) {
-          const fallback = synthesizeLocalResponse(message, scope, safeData);
-          res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
-          res.end();
-          return;
+        streamErr = err;
+        console.warn(`Primary model ${PRIMARY_MODEL} failed, trying secondary ${SECONDARY_MODEL}...`, err);
+        if (!isAuthKeyError(err)) {
+          activeModel = SECONDARY_MODEL;
+          try {
+            streamRes = await client.models.generateContentStream({
+              model: SECONDARY_MODEL,
+              contents: fullPromptString,
+            });
+            streamErr = null;
+          } catch (innerErr) {
+            streamErr = innerErr;
+          }
         }
       }
 
-      for await (const chunk of streamRes) {
-        if (chunk.text) {
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+      if (!streamRes || streamErr) {
+        const formatted = formatGemmaError(streamErr, activeModel);
+        res.write(
+          `data: ${JSON.stringify({
+            error: formatted.userMessage,
+            errorDetail: formatted.rawDetail,
+            model: activeModel,
+          })}\n\n`
+        );
+        res.end();
+        return;
+      }
+
+      try {
+        for await (const chunk of streamRes) {
+          if (chunk.text) {
+            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+          }
         }
+      } catch (chunkErr) {
+        const formatted = formatGemmaError(chunkErr, activeModel);
+        res.write(
+          `data: ${JSON.stringify({
+            error: formatted.userMessage,
+            errorDetail: formatted.rawDetail,
+            model: activeModel,
+          })}\n\n`
+        );
       }
       res.end();
       return;
     }
 
     let replyText = '';
+    let lastError: unknown = null;
+    let lastModel = PRIMARY_MODEL;
+
     // Step 1: Retry loop (3 attempts) for PRIMARY_MODEL
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        lastModel = PRIMARY_MODEL;
         const response = await client.models.generateContent({
           model: PRIMARY_MODEL,
           contents: fullPromptString,
         });
-        if (response.text) {
+        if (response.text && response.text.trim().length > 0) {
           replyText = response.text;
           break;
         }
+        lastError = new Error(`Mô hình ${PRIMARY_MODEL} trả về phản hồi trống.`);
       } catch (err: any) {
+        lastError = err;
+        console.warn(`Gemma error (${PRIMARY_MODEL}, attempt ${attempt}):`, err);
+        if (isNonRetryableGemmaError(err)) {
+          break;
+        }
         if (attempt < 3) {
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }
     }
 
-    // Step 2: If PRIMARY_MODEL fails after 3 attempts, try SECONDARY_MODEL up to 3 attempts
-    if (!replyText) {
+    // Step 2: If PRIMARY_MODEL fails (and not an invalid API key error), try SECONDARY_MODEL
+    if (!replyText && !isAuthKeyError(lastError)) {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
+          lastModel = SECONDARY_MODEL;
           const response = await client.models.generateContent({
             model: SECONDARY_MODEL,
             contents: fullPromptString,
           });
-          if (response.text) {
+          if (response.text && response.text.trim().length > 0) {
             replyText = response.text;
             break;
           }
+          lastError = new Error(`Mô hình ${SECONDARY_MODEL} trả về phản hồi trống.`);
         } catch (err: any) {
+          lastError = err;
+          console.warn(`Gemma error (${SECONDARY_MODEL}, attempt ${attempt}):`, err);
+          if (isNonRetryableGemmaError(err)) {
+            break;
+          }
           if (attempt < 3) {
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
@@ -854,30 +1145,30 @@ CÂU TRẢ LỜI CỦA TRỢ LÝ AI (Hãy trả lời bằng giọng văn tự n
     }
 
     if (!replyText) {
-      replyText = synthesizeLocalResponse(message, scope, safeData);
+      const formatted = formatGemmaError(
+        lastError || new Error('Mô hình không trả về nội dung phản hồi.'),
+        lastModel
+      );
+      res.status(formatted.statusCode).json({
+        error: formatted.userMessage,
+        errorDetail: formatted.rawDetail,
+        model: lastModel,
+      });
+      return;
     }
 
     res.json({
       reply: replyText,
+      model: lastModel,
       userRole: scope.role || 'guest',
     });
   } catch (err: any) {
     console.error('Error in /api/ai-assistant:', err);
-    // Even in case of unexpected exception, return graceful local synthesis
-    try {
-      const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-      const { message = '', userScope = { role: 'guest' }, authorizedData } = body;
-      const scope: UserScopePayload = userScope || { role: 'guest' };
-      const safeData = enforceDataIsolation(scope, authorizedData);
-      const localReply = synthesizeLocalResponse(message, scope, safeData);
-      res.json({ reply: localReply, userRole: scope.role || 'guest' });
-    } catch (innerErr) {
-      res.status(200).json({
-        reply:
-          'Trợ lý AI Nền nếp Học đường hiện chưa thể xử lý yêu cầu lúc này. Vui lòng kiểm tra lại câu hỏi hoặc thử lại sau.',
-        userRole: 'guest',
-      });
-    }
+    const formatted = formatGemmaError(err);
+    res.status(formatted.statusCode).json({
+      error: formatted.userMessage,
+      errorDetail: formatted.rawDetail,
+    });
   }
 });
 

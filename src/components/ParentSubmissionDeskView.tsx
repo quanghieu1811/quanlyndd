@@ -142,7 +142,7 @@ export const ParentSubmissionDeskView: React.FC<ParentSubmissionDeskViewProps> =
     setIsSubmitModalOpen(true);
   };
 
-  // Perform AI OCR Scanning via server-side Gemini 3.8 Flash
+  // Perform AI OCR Scanning via server-side Gemma 4
   const handleScanDocument = async (base64UrlOverride?: string) => {
     const fileUrlToScan = base64UrlOverride || subFileUrl;
     if (!fileUrlToScan) {
@@ -168,9 +168,14 @@ export const ParentSubmissionDeskView: React.FC<ParentSubmissionDeskViewProps> =
         }),
       });
 
-      const resData = await resp.json();
-      if (!resp.ok || !resData.success) {
-        throw new Error(resData.error || 'Không thể trích xuất văn bản từ tài liệu.');
+      const resData = await resp.json().catch(() => null);
+      if (!resp.ok || !resData?.success) {
+        const baseMsg =
+          resData?.error || 'Trợ lí AI đang trục trặc, vui lòng quay lại sau giây lát.';
+        const detailSuffix = resData?.errorDetail
+          ? `\nChi tiết lỗi từ Gemma: ${resData.errorDetail}`
+          : '';
+        throw new Error(`${baseMsg}${detailSuffix}`);
       }
 
       const extracted = resData.data;
@@ -1294,12 +1299,14 @@ export const ParentSubmissionDeskView: React.FC<ParentSubmissionDeskViewProps> =
                     )}
 
                     {ocrError && (
-                      <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 text-amber-800 dark:text-amber-200 text-[11px] flex items-center justify-between">
-                        <span>⚠️ {ocrError}</span>
+                      <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-[11px] flex items-start justify-between gap-2">
+                        <span className="whitespace-pre-wrap break-words flex-1">
+                          ⚠️ {ocrError}
+                        </span>
                         <button
                           type="button"
                           onClick={() => handleScanDocument()}
-                          className="font-bold underline ml-2 cursor-pointer"
+                          className="font-bold underline shrink-0 cursor-pointer"
                         >
                           Thử lại
                         </button>

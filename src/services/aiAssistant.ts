@@ -11,12 +11,434 @@ import {
   isGlobalRankingHidden,
   MASK_STUDENT_NAME,
 } from '../utils/privacyMasking.ts';
+import { ACADEMIC_MONTHS } from '../utils/academicWeeks.ts';
+
+function normalizeViText(input?: string | null): string {
+  return (input || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export interface QuerySliceIntent {
+  weeks: number[] | 'all' | null;
+  groups: number[] | null;
+  classIds: string[] | null;
+  isSchoolWide: boolean;
+  studentIds: string[] | null;
+  recordType: 'plus' | 'minus' | null;
+  subjectFilter: string | null;
+  dayOfWeekFilter: string | null;
+  includeRules: boolean;
+  isGeneralRuleOrGuideOnly: boolean;
+}
+
+function parseWeeksFromText(
+  q: string,
+  normQ: string,
+  currentWeek: number,
+  totalWeeks: number
+): number[] | 'all' | null {
+  if (
+    normQ.includes('tat ca cac tuan') ||
+    normQ.includes('tat ca tuan') ||
+    normQ.includes('toan bo cac tuan') ||
+    normQ.includes('toan bo tuan') ||
+    normQ.includes('ca nam') ||
+    normQ.includes('tu dau nam') ||
+    normQ.includes('tu dau ky') ||
+    normQ.includes('moi tuan') ||
+    normQ.includes('tong ket nam')
+  ) {
+    return 'all';
+  }
+
+  const weekSet = new Set<number>();
+
+  // Range: "từ tuần 10 đến tuần 13" or "tuần 10 - 13"
+  const rangeRegex =
+    /\b(?:tu\s*)?tuan\s*(\d{1,2})\s*(?:den|toi|-|–)\s*(?:tuan\s*)?(\d{1,2})\b/g;
+  let rangeMatch: RegExpExecArray | null;
+  while ((rangeMatch = rangeRegex.exec(normQ)) !== null) {
+    const start = Math.max(1, Math.min(totalWeeks, parseInt(rangeMatch[1], 10)));
+    const end = Math.max(1, Math.min(totalWeeks, parseInt(rangeMatch[2], 10)));
+    const [lo, hi] = start <= end ? [start, end] : [end, start];
+    for (let w = lo; w <= hi; w++) weekSet.add(w);
+  }
+
+  // Comma / "và" lists after "tuần": "tuần 12, 13 và 14"
+  const listRegex = /\btuan\s*((?:\d{1,2}(?:\s*(?:,|va|&)\s*|\s+))*\d{1,2})\b/g;
+  let listMatch: RegExpExecArray | null;
+  while ((listMatch = listRegex.exec(normQ)) !== null) {
+    const nums = listMatch[1].match(/\d{1,2}/g) || [];
+    for (const n of nums) {
+      const w = parseInt(n, 10);
+      if (w >= 1 && w <= totalWeeks) weekSet.add(w);
+    }
+  }
+
+  // Shorthand "t13" / "w13"
+  const shortWeekRegex = /\b[tw](\d{1,2})\b/g;
+  let shortMatch: RegExpExecArray | null;
+  while ((shortMatch = shortWeekRegex.exec(normQ)) !== null) {
+    const w = parseInt(shortMatch[1], 10);
+    if (w >= 1 && w <= totalWeeks) weekSet.add(w);
+  }
+
+  // Relative weeks
+  if (normQ.includes('tuan nay') || normQ.includes('tuan hien tai')) {
+    weekSet.add(currentWeek);
+  }
+  if (
+    normQ.includes('tuan truoc') ||
+    normQ.includes('tuan vua roi') ||
+    normQ.includes('tuan qua')
+  ) {
+    weekSet.add(Math.max(1, currentWeek - 1));
+  }
+  if (normQ.includes('tuan sau') || normQ.includes('tuan toi')) {
+    weekSet.add(Math.min(totalWeeks, currentWeek + 1));
+  }
+
+  // Months: "tháng 9", "tháng 10", ..., "tháng 5"
+  const monthRegex = /\bthang\s*(\d{1,2})\b/g;
+  let monthMatch: RegExpExecArray | null;
+  while ((monthMatch = monthRegex.exec(normQ)) !== null) {
+    const mNum = parseInt(monthMatch[1], 10);
+    const matchedMonth = ACADEMIC_MONTHS.find((m) => m.month === mNum);
+    if (matchedMonth) {
+      matchedMonth.weeks.forEach((w) => {
+        if (w >= 1 && w <= totalWeeks) weekSet.add(w);
+      });
+    }
+  }
+
+  // Semesters: "học kỳ 1" / "hk1", "học kỳ 2" / "hk2"
+  if (/\b(?:hoc ky|hk)\s*1\b/.test(normQ)) {
+    for (let w = 1; w <= Math.min(18, totalWeeks); w++) weekSet.add(w);
+  }
+  if (/\b(?:hoc ky|hk)\s*2\b/.test(normQ)) {
+    for (let w = 19; w <= totalWeeks; w++) weekSet.add(w);
+  }
+
+  if (weekSet.size > 0) {
+    return Array.from(weekSet).sort((a, b) => a - b);
+  }
+
+  // Distinguish "các tuần" general summary vs no week specified
+  if (/\bcac tuan\b/.test(normQ) && (normQ.includes('tong') || normQ.includes('thong ke'))) {
+    return 'all';
+  }
+
+  void q;
+  return null;
+}
+
+function parseGroupsFromText(normQ: string): number[] | null {
+  const groupSet = new Set<number>();
+
+  // Match "tổ 1, 2 và 3" or "tổ 3"
+  const groupListRegex = /\bto\s*((?:[1-4](?:\s*(?:,|va|&|voi|-|–)\s*)?)+)\b/g;
+  let match: RegExpExecArray | null;
+  while ((match = groupListRegex.exec(normQ)) !== null) {
+    const raw = match[1];
+    // Check range like "1-3"
+    const rangeM = raw.match(/([1-4])\s*(?:-|–)\s*([1-4])/);
+    if (rangeM) {
+      const a = parseInt(rangeM[1], 10);
+      const b = parseInt(rangeM[2], 10);
+      const [lo, hi] = a <= b ? [a, b] : [b, a];
+      for (let g = lo; g <= hi; g++) groupSet.add(g);
+    }
+    const nums = raw.match(/[1-4]/g) || [];
+    nums.forEach((n) => groupSet.add(parseInt(n, 10)));
+  }
+
+  return groupSet.size > 0 ? Array.from(groupSet).sort((a, b) => a - b) : null;
+}
+
+function dissectQueryIntent(params: {
+  query?: string;
+  history?: ChatMessage[];
+  currentWeek: number;
+  totalWeeks: number;
+  systemConfig: SchoolSystemConfig;
+  students: Student[];
+  selectedClassId: string;
+  role: string;
+  assignedGroup?: number;
+}): QuerySliceIntent {
+  const {
+    query = '',
+    history = [],
+    currentWeek,
+    totalWeeks,
+    systemConfig,
+    students,
+    selectedClassId,
+    role,
+    assignedGroup,
+  } = params;
+
+  const q = query.toLowerCase().trim();
+  const normQ = normalizeViText(query);
+
+  // Determine class scope
+  let isSchoolWide = false;
+  let classIds: string[] | null = [selectedClassId || '8A1'];
+
+  if (role === 'admin') {
+    if (
+      normQ.includes('toan truong') ||
+      normQ.includes('tat ca cac lop') ||
+      normQ.includes('tat ca lop') ||
+      normQ.includes('cac lop trong truong')
+    ) {
+      isSchoolWide = true;
+      classIds = null;
+    } else {
+      const matchedClasses = (systemConfig.classes || [])
+        .filter((c) => {
+          const cid = normalizeViText(c.id);
+          const cname = normalizeViText(c.name);
+          return (
+            (cid && new RegExp(`(^|[^a-z0-9])${cid}([^a-z0-9]|$)`).test(normQ)) ||
+            (cname && normQ.includes(cname))
+          );
+        })
+        .map((c) => c.id);
+
+      if (matchedClasses.length > 0) {
+        classIds = matchedClasses;
+      }
+    }
+  }
+
+  let weeks = parseWeeksFromText(q, normQ, currentWeek, totalWeeks);
+  let groups = parseGroupsFromText(normQ);
+
+  // Follow-up context inheritance when user asks short follow-up like "còn điểm cộng thì sao?"
+  const isLikelyFollowUp =
+    normQ.length > 0 &&
+    normQ.length <= 60 &&
+    (normQ.startsWith('con ') ||
+      normQ.startsWith('the ') ||
+      normQ.startsWith('vay ') ||
+      normQ.includes('chi tiet hon') ||
+      normQ.includes('cu the hon') ||
+      normQ.includes('nua khong') ||
+      normQ.includes('diem cong') ||
+      normQ.includes('diem tru'));
+
+  if (isLikelyFollowUp && (weeks === null || groups === null) && history.length > 0) {
+    const prevUserMsg = [...history].reverse().find((m) => m.role === 'user');
+    if (prevUserMsg?.text) {
+      const prevNorm = normalizeViText(prevUserMsg.text);
+      if (weeks === null) {
+        weeks = parseWeeksFromText(
+          prevUserMsg.text.toLowerCase(),
+          prevNorm,
+          currentWeek,
+          totalWeeks
+        );
+      }
+      if (groups === null) {
+        groups = parseGroupsFromText(prevNorm);
+      }
+    }
+  }
+
+  // Enforce To Truong isolation
+  if (role.startsWith('to') && assignedGroup) {
+    groups = [assignedGroup];
+  }
+
+  // Match specific students in allowed class/group scope (not for guest/phhs)
+  let studentIds: string[] | null = null;
+  if (role !== 'guest' && role !== 'phhs') {
+    const candidateStudents = students.filter((s) => {
+      const sClass = s.classId || '8A1';
+      if (classIds && !classIds.includes(sClass)) return false;
+      if (groups && !groups.includes(s.group)) return false;
+      return true;
+    });
+
+    const matchedIds = new Set<string>();
+    for (const s of candidateStudents) {
+      const normFull = normalizeViText(s.name);
+      if (!normFull) continue;
+      if (normQ.includes(normFull)) {
+        matchedIds.add(s.id);
+        continue;
+      }
+      const parts = normFull.split(' ').filter(Boolean);
+      if (parts.length >= 2) {
+        const lastTwo = `${parts[parts.length - 2]} ${parts[parts.length - 1]}`;
+        const boundaryRegex = new RegExp(`(^|[^a-z0-9])${lastTwo}([^a-z0-9]|$)`);
+        if (boundaryRegex.test(normQ)) {
+          matchedIds.add(s.id);
+          continue;
+        }
+      }
+      if (parts.length >= 1) {
+        const given = parts[parts.length - 1];
+        const explicitRefRegex = new RegExp(
+          `(?:ban|em|hoc sinh|hs)\\s+(?:[a-z]+\\s+)*${given}([^a-z0-9]|$)`
+        );
+        if (explicitRefRegex.test(normQ)) {
+          matchedIds.add(s.id);
+        }
+      }
+    }
+    if (matchedIds.size > 0) {
+      studentIds = Array.from(matchedIds);
+    }
+  }
+
+  // Record type dissection (only when exclusively asking about plus OR minus)
+  const asksMinus =
+    normQ.includes('loi') ||
+    normQ.includes('vi pham') ||
+    normQ.includes('bi tru') ||
+    normQ.includes('tru diem') ||
+    normQ.includes('phat') ||
+    normQ.includes('canh bao');
+  const asksPlus =
+    normQ.includes('diem cong') ||
+    normQ.includes('duoc cong') ||
+    normQ.includes('cong diem') ||
+    normQ.includes('thanh tich') ||
+    normQ.includes('khen thuong') ||
+    normQ.includes('diem 10') ||
+    normQ.includes('viec tot');
+  const asksOverall =
+    normQ.includes('tinh hinh') ||
+    normQ.includes('tong ket') ||
+    normQ.includes('xep hang') ||
+    normQ.includes('bang diem') ||
+    normQ.includes('tong diem') ||
+    normQ.includes('cong tru') ||
+    normQ.includes('cong/tru');
+
+  let recordType: 'plus' | 'minus' | null = null;
+  if (!asksOverall) {
+    if (asksMinus && !asksPlus) recordType = 'minus';
+    else if (asksPlus && !asksMinus) recordType = 'plus';
+  }
+
+  // Optional subject filter
+  let subjectFilter: string | null = null;
+  for (const subj of systemConfig.subjects || []) {
+    const normSubj = normalizeViText(subj);
+    if (normSubj && normQ.includes(`mon ${normSubj}`)) {
+      subjectFilter = subj;
+      break;
+    }
+  }
+
+  // Optional day of week filter
+  let dayOfWeekFilter: string | null = null;
+  const dayMatches: Array<[RegExp, string]> = [
+    [/\bthu\s*(?:2|hai)\b/, 'Thứ 2'],
+    [/\bthu\s*(?:3|ba)\b/, 'Thứ 3'],
+    [/\bthu\s*(?:4|tu)\b/, 'Thứ 4'],
+    [/\bthu\s*(?:5|nam)\b/, 'Thứ 5'],
+    [/\bthu\s*(?:6|sau)\b/, 'Thứ 6'],
+    [/\bthu\s*(?:7|bay)\b/, 'Thứ 7'],
+    [/\bchu nhat\b/, 'Chủ nhật'],
+  ];
+  for (const [rx, label] of dayMatches) {
+    if (rx.test(normQ)) {
+      dayOfWeekFilter = label;
+      break;
+    }
+  }
+
+  const includeRules =
+    role === 'guest' ||
+    normQ.includes('noi quy') ||
+    normQ.includes('quy che') ||
+    normQ.includes('khung diem') ||
+    normQ.includes('quy dinh') ||
+    normQ.includes('sao do') ||
+    normQ.includes('co do') ||
+    normQ.includes('nhan doi') ||
+    normQ.includes('muon') ||
+    normQ.includes('khan quang') ||
+    normQ.includes('dong phuc') ||
+    normQ.includes('truc nhat') ||
+    normQ.includes('chep phat') ||
+    normQ.includes('muc diem');
+
+  const isGuideQuery =
+    normQ.includes('xin phep') ||
+    normQ.includes('nghi hoc') ||
+    normQ.includes('nop don') ||
+    normQ.includes('giay khen') ||
+    normQ.includes('bao cao sai') ||
+    normQ.includes('gop y') ||
+    normQ.includes('dang nhap');
+
+  const targetsStudentOrScoreData =
+    weeks !== null ||
+    groups !== null ||
+    studentIds !== null ||
+    isSchoolWide ||
+    normQ.includes('tuan') ||
+    normQ.includes('thang') ||
+    normQ.includes('lop') ||
+    normQ.includes('si so') ||
+    normQ.includes('xep hang') ||
+    normQ.includes('ai bi') ||
+    normQ.includes('nhung ban') ||
+    normQ.includes('con ') ||
+    normQ.includes('diem cua');
+
+  const isGeneralRuleOrGuideOnly =
+    (includeRules || isGuideQuery) && !targetsStudentOrScoreData && !normQ;
+
+  // Careful: allow rule-only or guide-only when query actually is rules/guide without data slice
+  const trulyGeneralOnly =
+    (includeRules || isGuideQuery) &&
+    weeks === null &&
+    groups === null &&
+    studentIds === null &&
+    !isSchoolWide &&
+    !normQ.includes('tuan') &&
+    !normQ.includes('thang') &&
+    !normQ.includes('si so') &&
+    !normQ.includes('xep hang') &&
+    !normQ.includes('ai bi') &&
+    !normQ.includes('nhung ban') &&
+    !normQ.includes('tinh hinh') &&
+    !normQ.includes('bao nhieu ban') &&
+    !normQ.includes('bao nhieu hoc sinh');
+
+  void isGeneralRuleOrGuideOnly;
+
+  return {
+    weeks,
+    groups,
+    classIds,
+    isSchoolWide,
+    studentIds,
+    recordType,
+    subjectFilter,
+    dayOfWeekFilter,
+    includeRules,
+    isGeneralRuleOrGuideOnly: trulyGeneralOnly,
+  };
+}
 
 export interface ChatMessage {
   id: string;
   role: 'user' | 'model';
   text: string;
   timestamp: string;
+  isError?: boolean;
 }
 
 export interface AssistantRequestPayload {
@@ -35,7 +457,8 @@ export interface AssistantRequestPayload {
 }
 
 /**
- * Builds the data payload according to the user's role and authorization.
+ * Builds the data payload according to the user's role, privacy configuration,
+ * and exact query slices ("mổ xẻ" theo tuần/tổ/học sinh/lớp và lấy ĐẦY ĐỦ 100%).
  */
 export function buildAuthorizedContext(params: {
   currentUser: UserAccount | null;
@@ -46,6 +469,8 @@ export function buildAuthorizedContext(params: {
   rules: RuleItem[];
   systemConfig: SchoolSystemConfig;
   selectedClass?: SchoolClass;
+  query?: string;
+  history?: ChatMessage[];
 }) {
   const {
     currentUser,
@@ -56,6 +481,8 @@ export function buildAuthorizedContext(params: {
     rules,
     systemConfig,
     selectedClass,
+    query = '',
+    history = [],
   } = params;
 
   const isTeacherOrAdmin =
@@ -69,13 +496,26 @@ export function buildAuthorizedContext(params: {
     : records.filter((r) => !hiddenWeeksSet.has(r.week));
   const isCurrentWeekHidden = !isTeacherOrAdmin && hiddenWeeksSet.has(currentWeek);
 
-  // Helper to mask name
   const maskName = (name: string) => {
     if (!shouldHideGlobal) return name;
     return MASK_STUDENT_NAME;
   };
 
-  // Basic school context available to all (including guests)
+  const role = currentUser?.role || 'guest';
+  const userClassId = currentUser?.classId || selectedClassId || '8A1';
+
+  const intent = dissectQueryIntent({
+    query,
+    history,
+    currentWeek,
+    totalWeeks: systemConfig?.totalWeeks || 35,
+    systemConfig,
+    students,
+    selectedClassId: userClassId,
+    role,
+    assignedGroup: currentUser?.assignedGroup,
+  });
+
   const schoolInfo = {
     schoolName: systemConfig?.schoolName || 'Trường THCS Nguyễn Đăng Đạo',
     schoolShortName: systemConfig?.schoolShortName || 'THCS NGUYỄN ĐĂNG ĐẠO',
@@ -88,27 +528,25 @@ export function buildAuthorizedContext(params: {
     schoolPenaltyMultiplier: systemConfig?.schoolPenaltyMultiplier || 2,
   };
 
-  // Summarize rules (top 30 most common or important)
-  const rulesSummary = rules
-    .slice(0, 40)
+  // Include ALL rules when rule-related (no .slice truncation)
+  const fullRulesSummary = rules
     .map(
       (r) =>
-        `- [${r.category === 'class_reward' ? 'THƯỞNG' : 'PHẠT'}]: ${r.title} (${
+        `- [${r.category === 'class_reward' ? 'THƯỞNG' : r.category === 'school_penalty' ? 'PHẠT SAO ĐỎ' : 'PHẠT LỚP'}]: ${r.title} (${
           r.type === 'plus' ? '+' : '-'
         }${r.points}đ). Chi tiết: ${r.detail || r.title}`
     )
     .join('\n');
 
+  const rulesSummary = intent.includeRules ? fullRulesSummary : undefined;
+
   // GUEST: Only school info & rules
   if (!currentUser) {
     return {
       schoolInfo,
-      rulesSummary,
+      rulesSummary: fullRulesSummary,
     };
   }
-
-  const role = currentUser.role;
-  const userClassId = currentUser.classId || selectedClassId || '8A1';
 
   // Global hide active for non-teacher/admin roles: suppress all student scores, rankings, and point records
   if (shouldHideGlobal) {
@@ -124,6 +562,71 @@ export function buildAuthorizedContext(params: {
         'Điểm số, bảng xếp hạng và dữ liệu ghi nhận vi phạm/khen thưởng hiện đang được tạm ẩn trên toàn hệ thống theo cấu hình của Admin/GVCN.',
     };
   }
+
+  // General rule / guide question without specific student/week/group target: omit heavy student/record payloads
+  if (intent.isGeneralRuleOrGuideOnly) {
+    return {
+      schoolInfo,
+      rulesSummary: fullRulesSummary,
+      classInfo: {
+        classId: userClassId,
+        className: selectedClass?.name || `Lớp ${userClassId}`,
+        gvcn: selectedClass?.gvcn,
+      },
+      sliceMeta: {
+        scopeDescription: 'Câu hỏi nội quy / hướng dẫn chung (không cần tải dữ liệu điểm chi tiết)',
+      },
+    };
+  }
+
+  // Helper: detect if user explicitly asked for hidden week(s)
+  const hiddenWeeksRequested =
+    Array.isArray(intent.weeks) && !isTeacherOrAdmin
+      ? intent.weeks.filter((w) => hiddenWeeksSet.has(w))
+      : [];
+
+  // Helper to filter records according to dissected dimensions (returns 100% of matching records)
+  const applySliceFilters = (
+    sourceRecords: PointRecord[],
+    targetWeeks: number[] | 'all',
+    applyTypeAndAttrFilters: boolean = true
+  ) => {
+    return sourceRecords.filter((r) => {
+      if (targetWeeks !== 'all' && !targetWeeks.includes(r.week)) return false;
+      if (intent.groups && !intent.groups.includes(r.group)) return false;
+      if (intent.studentIds && !intent.studentIds.includes(r.studentId)) return false;
+      if (applyTypeAndAttrFilters) {
+        if (intent.recordType && r.type !== intent.recordType) return false;
+        if (
+          intent.subjectFilter &&
+          normalizeViText(r.subject) !== normalizeViText(intent.subjectFilter)
+        ) {
+          return false;
+        }
+        if (
+          intent.dayOfWeekFilter &&
+          normalizeViText(r.dayOfWeek) !== normalizeViText(intent.dayOfWeekFilter)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  };
+
+  const mapFullRecord = (r: PointRecord, includeClassId: boolean = false) => ({
+    week: r.week,
+    ...(includeClassId ? { classId: r.classId || '8A1' } : {}),
+    type: r.type,
+    points: r.points,
+    ruleTitle: r.ruleTitle,
+    reason: r.reason,
+    ...(r.subject ? { subject: r.subject } : {}),
+    ...(r.dayOfWeek ? { dayOfWeek: r.dayOfWeek } : {}),
+    studentId: r.studentId,
+    studentName: maskName(r.studentName),
+    group: r.group,
+  });
 
   // 1. PHHS: Strictly limited to their own child!
   if (role === 'phhs') {
@@ -147,7 +650,30 @@ export function buildAuthorizedContext(params: {
         )
     );
 
-    // Current week points (excluded if currentWeek is hidden)
+    // If user asked for specific weeks -> only those weeks; otherwise ALL visible weeks of the child
+    const targetWeeks: number[] | 'all' =
+      Array.isArray(intent.weeks) ? intent.weeks : 'all';
+
+    const matchedChildRecords = studentRecords
+      .filter((r) => {
+        if (targetWeeks !== 'all' && !targetWeeks.includes(r.week)) return false;
+        if (intent.recordType && r.type !== intent.recordType) return false;
+        if (
+          intent.subjectFilter &&
+          normalizeViText(r.subject) !== normalizeViText(intent.subjectFilter)
+        ) {
+          return false;
+        }
+        if (
+          intent.dayOfWeekFilter &&
+          normalizeViText(r.dayOfWeek) !== normalizeViText(intent.dayOfWeekFilter)
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => b.week - a.week);
+
     const currentWeekRecords = isCurrentWeekHidden
       ? []
       : studentRecords.filter((r) => r.week === currentWeek);
@@ -167,9 +693,12 @@ export function buildAuthorizedContext(params: {
     const baseScore = student?.baseScore ?? selectedClass?.baseScore ?? 100;
     const allWeeksTotal = baseScore + totalPlusAll - totalMinusAll;
 
-    // Prioritize current week records first so current week data is never missed
-    const otherRecs = studentRecords.filter((r) => r.week !== currentWeek);
-    const sortedStudentRecords = [...currentWeekRecords, ...otherRecs.reverse()];
+    const slicePlus = matchedChildRecords
+      .filter((r) => r.type === 'plus')
+      .reduce((sum, r) => sum + r.points, 0);
+    const sliceMinus = matchedChildRecords
+      .filter((r) => r.type === 'minus')
+      .reduce((sum, r) => sum + r.points, 0);
 
     return {
       schoolInfo,
@@ -180,6 +709,17 @@ export function buildAuthorizedContext(params: {
         gvcn: selectedClass?.gvcn,
       },
       currentWeekHidden: isCurrentWeekHidden,
+      ...(hiddenWeeksRequested.length > 0 ? { hiddenWeeksRequested } : {}),
+      sliceMeta: {
+        scopeDescription: `Dữ liệu riêng của em ${student?.name || currentUser.studentName || 'Học sinh'} • ${
+          targetWeeks === 'all' ? 'Tất cả tuần công khai' : `Tuần ${targetWeeks.join(', ')}`
+        }`,
+        weeks: targetWeeks,
+        recordType: intent.recordType || 'all',
+        totalMatchedRecords: matchedChildRecords.length,
+        slicePlus,
+        sliceMinus,
+      },
       studentInfo: student
         ? {
             id: student.id,
@@ -205,21 +745,12 @@ export function buildAuthorizedContext(params: {
         isWarning: !isCurrentWeekHidden && cwMinus >= (systemConfig?.penaltyWarningThreshold || 6),
         recordsCount: studentRecords.length,
       },
-      recentRecords: sortedStudentRecords.slice(0, 30).map((r) => ({
-        week: r.week,
-        type: r.type,
-        points: r.points,
-        ruleTitle: r.ruleTitle,
-        reason: r.reason,
-        subject: r.subject,
-        dayOfWeek: r.dayOfWeek,
-        studentId: r.studentId,
-        studentName: maskName(r.studentName),
-      })),
+      // 100% untruncated records for the requested slice
+      recentRecords: matchedChildRecords.map((r) => mapFullRecord(r)),
     };
   }
 
-  // 2. TO TRUONG (to1..to4): Can see their group (excluding hidden weeks)
+  // 2. TO TRUONG (to1..to4): Strictly their group only (excluding hidden weeks)
   if (role.startsWith('to') && currentUser.assignedGroup) {
     const groupNum = currentUser.assignedGroup;
     const groupStudents = students.filter(
@@ -229,11 +760,47 @@ export function buildAuthorizedContext(params: {
       (r) => (r.classId || '8A1') === userClassId && r.group === groupNum
     );
 
-    const currentWeekRecs = isCurrentWeekHidden
-      ? []
-      : groupRecords.filter((r) => r.week === currentWeek);
-    const otherRecs = groupRecords.filter((r) => r.week !== currentWeek);
-    const sortedGroupRecords = [...currentWeekRecs, ...otherRecs.reverse()];
+    const targetWeeks: number[] | 'all' =
+      intent.weeks === 'all'
+        ? 'all'
+        : Array.isArray(intent.weeks)
+        ? intent.weeks
+        : intent.studentIds
+        ? 'all'
+        : 'all';
+
+    const matchedStudents = intent.studentIds
+      ? groupStudents.filter((s) => intent.studentIds!.includes(s.id))
+      : groupStudents;
+
+    const scoreSliceRecords = applySliceFilters(groupRecords, targetWeeks, false);
+    const matchedRecords = applySliceFilters(groupRecords, targetWeeks, true).sort(
+      (a, b) => b.week - a.week
+    );
+
+    const memberStats = matchedStudents.map((s) => {
+      const sRecs = scoreSliceRecords.filter((r) => r.studentId === s.id);
+      const plus = sRecs.filter((r) => r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
+      const minus = sRecs.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
+      const base = s.baseScore ?? selectedClass?.baseScore ?? 100;
+      return {
+        id: s.id,
+        stt: s.stt,
+        name: maskName(s.name),
+        group: s.group,
+        plus,
+        minus,
+        netScore: base + plus - minus,
+        recordsCount: sRecs.length,
+      };
+    });
+
+    const totalPlus = scoreSliceRecords
+      .filter((r) => r.type === 'plus')
+      .reduce((sum, r) => sum + r.points, 0);
+    const totalMinus = scoreSliceRecords
+      .filter((r) => r.type === 'minus')
+      .reduce((sum, r) => sum + r.points, 0);
 
     return {
       schoolInfo,
@@ -244,110 +811,220 @@ export function buildAuthorizedContext(params: {
         gvcn: selectedClass?.gvcn,
       },
       currentWeekHidden: isCurrentWeekHidden,
+      ...(hiddenWeeksRequested.length > 0 ? { hiddenWeeksRequested } : {}),
+      sliceMeta: {
+        scopeDescription: `Lớp ${userClassId} • Tổ ${groupNum} • ${
+          targetWeeks === 'all' ? 'Tất cả tuần công khai' : `Tuần ${targetWeeks.join(', ')}`
+        }${intent.studentIds ? ` • ${matchedStudents.length} học sinh được hỏi` : ''}`,
+        weeks: targetWeeks,
+        groups: [groupNum],
+        recordType: intent.recordType || 'all',
+        totalMatchedRecords: matchedRecords.length,
+      },
       groupSummary: {
         groupNumber: groupNum,
-        memberCount: groupStudents.length,
-        members: groupStudents.map((s) => ({ id: s.id, name: maskName(s.name), stt: s.stt })),
-        currentWeekRecordsCount: currentWeekRecs.length,
+        memberCount: matchedStudents.length,
+        totalPlus,
+        totalMinus,
+        totalScore: memberStats.reduce((sum, m) => sum + m.netScore, 0),
+        members: memberStats,
+        matchedRecordsCount: matchedRecords.length,
       },
-      recentRecords: sortedGroupRecords.slice(0, 30).map((r) => ({
-        week: r.week,
-        type: r.type,
-        points: r.points,
-        ruleTitle: r.ruleTitle,
-        reason: r.reason,
-        subject: r.subject,
-        dayOfWeek: r.dayOfWeek,
-        studentName: maskName(r.studentName),
-        group: r.group,
-      })),
+      // 100% untruncated records for the requested slice
+      recentRecords: matchedRecords.map((r) => mapFullRecord(r)),
     };
   }
 
-  // 3. GVCN & BAN CAN SU LOP (loptruong, loppho)
-  if (role === 'gvcn' || role === 'loptruong' || role === 'loppho') {
-    const classStudents = students.filter((s) => (s.classId || '8A1') === userClassId);
-    const classRecords = visibleRecords.filter((r) => (r.classId || '8A1') === userClassId);
+  // 3. GVCN, BAN CAN SU LOP (loptruong, loppho), or ADMIN
+  if (role === 'gvcn' || role === 'loptruong' || role === 'loppho' || role === 'admin') {
+    const activeClassIds =
+      role === 'admin'
+        ? intent.classIds
+        : [userClassId];
 
-    // Compute student summaries for current week (empty if currentWeek hidden for non-GVCN)
-    const currentWeekRecords = isCurrentWeekHidden
-      ? []
-      : classRecords.filter((r) => r.week === currentWeek);
-    const warningStudents = isCurrentWeekHidden
-      ? []
-      : classStudents
-          .map((s) => {
-            const sMinus = currentWeekRecords
-              .filter((r) => r.studentId === s.id && r.type === 'minus')
-              .reduce((sum, r) => sum + r.points, 0);
-            return { name: maskName(s.name), group: s.group, minusPoints: sMinus };
-          })
-          .filter((s) => s.minusPoints >= (systemConfig?.penaltyWarningThreshold || 6));
+    const scopedStudents = students.filter((s) => {
+      const sClass = s.classId || '8A1';
+      if (activeClassIds && !activeClassIds.includes(sClass)) return false;
+      if (intent.groups && !intent.groups.includes(s.group)) return false;
+      if (intent.studentIds && !intent.studentIds.includes(s.id)) return false;
+      return true;
+    });
 
-    const otherRecs = classRecords.filter((r) => r.week !== currentWeek);
-    const sortedClassRecords = [...currentWeekRecords, ...otherRecs.reverse()];
+    const scopedVisibleRecords = visibleRecords.filter((r) => {
+      const rClass = r.classId || '8A1';
+      if (activeClassIds && !activeClassIds.includes(rClass)) return false;
+      return true;
+    });
 
-    return {
+    // Determine exact week slice:
+    // - If user asked specific weeks -> ONLY those weeks
+    // - If user asked for a specific group or specific student(s) without naming a week -> ALL weeks for that group/student!
+    // - If Admin asked school-wide overview without naming a week -> currentWeek (with school-wide stats)
+    // - Otherwise (general class overview without naming week/group/student) -> currentWeek + weeklyOverview
+    let targetWeeks: number[] | 'all';
+    if (intent.weeks === 'all') {
+      targetWeeks = 'all';
+    } else if (Array.isArray(intent.weeks)) {
+      targetWeeks = intent.weeks;
+    } else if (intent.groups || intent.studentIds) {
+      targetWeeks = 'all';
+    } else {
+      targetWeeks = [currentWeek];
+    }
+
+    const scoreSliceRecords = applySliceFilters(scopedVisibleRecords, targetWeeks, false);
+    const matchedRecords = applySliceFilters(scopedVisibleRecords, targetWeeks, true).sort(
+      (a, b) => b.week - a.week
+    );
+
+    const warningThreshold = systemConfig?.penaltyWarningThreshold || 6;
+    const defaultBaseScore = selectedClass?.baseScore ?? 100;
+
+    // Build exact per-student stats for the dissected slice
+    const studentSummaries = scopedStudents.map((s) => {
+      const sRecs = scoreSliceRecords.filter((r) => r.studentId === s.id);
+      const plus = sRecs.filter((r) => r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
+      const minus = sRecs.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
+      const base = s.baseScore ?? defaultBaseScore;
+      return {
+        id: s.id,
+        stt: s.stt,
+        name: maskName(s.name),
+        group: s.group,
+        ...(intent.isSchoolWide ? { classId: s.classId || '8A1' } : {}),
+        plus,
+        minus,
+        netScore: base + plus - minus,
+        recordsCount: sRecs.length,
+        isWarning: minus >= warningThreshold,
+      };
+    });
+
+    const warningStudents = studentSummaries
+      .filter((s) => s.isWarning)
+      .map((s) => ({
+        name: s.name,
+        group: s.group,
+        ...(s.classId ? { classId: s.classId } : {}),
+        minusPoints: s.minus,
+      }));
+
+    // Build exact group summaries ONLY for the dissected groups (e.g. only Tổ 3 if Tổ 3 was asked)
+    const activeGroups = intent.groups
+      ? intent.groups
+      : intent.studentIds && scopedStudents.length > 0
+      ? Array.from(new Set(scopedStudents.map((s) => s.group))).sort((a, b) => a - b)
+      : [1, 2, 3, 4];
+    const groupSummaries = activeGroups.map((g) => {
+      const members = studentSummaries.filter((s) => s.group === g);
+      const gRecs = scoreSliceRecords.filter((r) => r.group === g);
+      const gPlus = gRecs.filter((r) => r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
+      const gMinus = gRecs.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
+      const gTotalScore = members.reduce((sum, m) => sum + m.netScore, 0);
+      return {
+        group: g,
+        memberCount: members.length,
+        totalPlus: gPlus,
+        totalMinus: gMinus,
+        totalScore: gTotalScore,
+        averageScore: members.length > 0 ? Number((gTotalScore / members.length).toFixed(2)) : 0,
+        recordsCount: gRecs.length,
+      };
+    });
+
+    // If user didn't pick a specific week/group/student, also include compact weeklyOverview across all weeks
+    let weeklyOverview:
+      | Array<{ week: number; recordCount: number; totalPlus: number; totalMinus: number }>
+      | undefined;
+    if (intent.weeks === null && !intent.groups && !intent.studentIds) {
+      const weekMap = new Map<number, { week: number; recordCount: number; totalPlus: number; totalMinus: number }>();
+      for (const r of scopedVisibleRecords) {
+        const entry = weekMap.get(r.week) || {
+          week: r.week,
+          recordCount: 0,
+          totalPlus: 0,
+          totalMinus: 0,
+        };
+        entry.recordCount += 1;
+        if (r.type === 'plus') entry.totalPlus += r.points;
+        else entry.totalMinus += r.points;
+        weekMap.set(r.week, entry);
+      }
+      if (weekMap.size > 0) {
+        weeklyOverview = Array.from(weekMap.values()).sort((a, b) => a.week - b.week);
+      }
+    }
+
+    const focusClassId = activeClassIds?.length === 1 ? activeClassIds[0] : userClassId;
+    const focusClassObj =
+      (systemConfig.classes || []).find((c) => c.id === focusClassId) || selectedClass;
+
+    const basePayload: AuthorizedDataContext = {
       schoolInfo,
       rulesSummary,
       classInfo: {
-        classId: userClassId,
-        className: selectedClass?.name || `Lớp ${userClassId}`,
-        gvcn: selectedClass?.gvcn,
-        totalStudents: classStudents.length,
-        loptruong: selectedClass?.loptruong,
-        loppho: selectedClass?.loppho,
+        classId: focusClassId,
+        className: focusClassObj?.name || `Lớp ${focusClassId}`,
+        gvcn: focusClassObj?.gvcn,
+        totalStudents: scopedStudents.length,
+        loptruong: focusClassObj?.loptruong,
+        loppho: focusClassObj?.loppho,
       },
       currentWeekHidden: isCurrentWeekHidden,
+      ...(hiddenWeeksRequested.length > 0 ? { hiddenWeeksRequested } : {}),
+      sliceMeta: {
+        scopeDescription: `${
+          intent.isSchoolWide
+            ? 'Toàn trường'
+            : `Lớp ${(activeClassIds || [focusClassId]).join(', ')}`
+        } • ${
+          targetWeeks === 'all' ? 'Tất cả tuần' : `Tuần ${targetWeeks.join(', ')}`
+        }${intent.groups ? ` • Tổ ${intent.groups.join(', ')}` : ' • Tất cả các tổ'}${
+          intent.studentIds ? ` • ${scopedStudents.length} học sinh cụ thể` : ''
+        }${intent.recordType ? ` • Chỉ lọc điểm ${intent.recordType === 'plus' ? 'Cộng' : 'Trừ'}` : ''}`,
+        weeks: targetWeeks,
+        groups: activeGroups,
+        classIds: activeClassIds || 'all',
+        recordType: intent.recordType || 'all',
+        totalMatchedRecords: matchedRecords.length,
+      },
       classSummary: {
-        totalStudents: classStudents.length,
+        totalStudents: scopedStudents.length,
         currentWeekWarningCount: warningStudents.length,
         warningStudents,
       },
-      recentRecords: sortedClassRecords.slice(0, 30).map((r) => ({
-        week: r.week,
-        type: r.type,
-        points: r.points,
-        ruleTitle: r.ruleTitle,
-        reason: r.reason,
-        subject: r.subject,
-        dayOfWeek: r.dayOfWeek,
-        studentName: maskName(r.studentName),
-        group: r.group,
-      })),
+      groupSummaries,
+      // Include full dissected member list when focused on specific group(s), student(s), or specific week(s)
+      ...(!intent.isSchoolWide ? { studentSummaries } : {}),
+      ...(weeklyOverview ? { weeklyOverview } : {}),
+      // 100% untruncated records for the requested slice (omit raw records on school-wide overview unless weeks/groups/students targeted)
+      recentRecords:
+        intent.isSchoolWide && intent.weeks === null && !intent.groups && !intent.studentIds
+          ? []
+          : matchedRecords.map((r) => mapFullRecord(r, intent.isSchoolWide)),
     };
-  }
 
-  // 4. ADMIN: Full access
-  if (role === 'admin') {
-    const currentWeekRecs = records.filter((r) => r.week === currentWeek);
-    const otherRecs = records.filter((r) => r.week !== currentWeek);
-    const sortedAdminRecords = [...currentWeekRecs, ...otherRecs.reverse()];
+    if (role === 'admin') {
+      return {
+        ...basePayload,
+        classes: (systemConfig.classes || []).map((c) => {
+          const cStudents = students.filter((s) => (s.classId || '8A1') === c.id);
+          const cRecords = records.filter((r) => (r.classId || '8A1') === c.id);
+          return {
+            id: c.id,
+            name: c.name,
+            gvcn: c.gvcn,
+            totalStudents: cStudents.length || c.totalStudents,
+            totalRecords: cRecords.length,
+          };
+        }),
+        totalStudentsAcrossSchool: students.length,
+        totalRecordsAcrossSchool: records.length,
+        currentClassId: focusClassId,
+      };
+    }
 
-    return {
-      schoolInfo,
-      rulesSummary,
-      classes: (systemConfig.classes || []).map((c) => ({
-        id: c.id,
-        name: c.name,
-        gvcn: c.gvcn,
-        totalStudents: c.totalStudents,
-      })),
-      totalStudentsAcrossSchool: students.length,
-      totalRecordsAcrossSchool: records.length,
-      currentClassId: selectedClassId,
-      recentRecords: sortedAdminRecords.slice(0, 35).map((r) => ({
-        week: r.week,
-        classId: r.classId,
-        type: r.type,
-        points: r.points,
-        ruleTitle: r.ruleTitle,
-        reason: r.reason,
-        subject: r.subject,
-        studentName: maskName(r.studentName),
-        group: r.group,
-      })),
-    };
+    return basePayload;
   }
 
   return { schoolInfo, rulesSummary };
@@ -370,9 +1047,18 @@ interface AuthorizedDataContext {
   classSummary?: any;
   studentInfo?: any;
   groupSummary?: any;
+  groupSummaries?: any[];
+  studentSummaries?: any[];
+  weeklyOverview?: any[];
+  sliceMeta?: any;
+  hiddenWeeksRequested?: number[];
   studentPointsSummary?: any;
   recentRecords?: any[];
   classRankingSummary?: any[];
+  classes?: any[];
+  totalStudentsAcrossSchool?: number;
+  totalRecordsAcrossSchool?: number;
+  currentClassId?: string;
   privacyNotice?: string;
   currentWeekHidden?: boolean;
 }
@@ -684,8 +1370,8 @@ async function streamTextInChunks(
 }
 
 /**
- * Sends a query to the server-side AI assistant (/api/ai-assistant), falling back cleanly to local browser synthesizer.
- * Supports real-time streaming via onChunk callback.
+ * Sends a query to the server-side AI assistant (/api/ai-assistant) backed by Gemma.
+ * Propagates real server/model errors cleanly instead of silently masking failures.
  */
 export async function sendAiAssistantMessage(
   message: string,
@@ -709,14 +1395,16 @@ export async function sendAiAssistantMessage(
         role: 'guest',
       };
 
-  const formattedHistory = history.map((h) => ({
-    role: h.role,
-    text: h.text,
-  }));
+  const formattedHistory = history
+    .filter((h) => !h.isError && h.text.trim().length > 0)
+    .map((h) => ({
+      role: h.role,
+      text: h.text,
+    }));
 
-  // 1. Call server-side endpoint (uses process.env.GEMINI_API_KEY on server)
+  let response: Response;
   try {
-    const response = await fetch('/api/ai-assistant', {
+    response = await fetch('/api/ai-assistant', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -728,21 +1416,39 @@ export async function sendAiAssistantMessage(
         authorizedData: contextData,
       }),
     });
-
-    if (response.ok) {
-      const result = await response.json();
-      if (result && typeof result.reply === 'string' && result.reply.trim().length > 0) {
-        return await streamTextInChunks(result.reply, onChunk);
-      }
-    }
-  } catch (serverErr) {
-    console.warn('Server endpoint /api/ai-assistant unreachable or failed. Using local response synthesizer...', serverErr);
+  } catch (networkErr: any) {
+    const detail = networkErr?.message || 'Không thể kết nối tới máy chủ.';
+    throw new Error(
+      `Trợ lí AI đang trục trặc do không kết nối được tới máy chủ, vui lòng quay lại sau giây lát.\n\n**Chi tiết lỗi:** \`${detail}\``
+    );
   }
 
-  // 2. Guaranteed zero-failure local browser synthesizer with real-time typewriter stream
-  const safeData = enforceDataIsolationOnClient(userScope, contextData);
-  const rawSynthesized = synthesizeClientResponse(message, userScope, safeData);
-  return await streamTextInChunks(rawSynthesized, onChunk);
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.error) {
+    const userMessage =
+      typeof result?.error === 'string' && result.error.trim().length > 0
+        ? result.error.trim()
+        : 'Trợ lí AI đang trục trặc, vui lòng quay lại sau giây lát.';
+    const parts = [userMessage];
+    if (result?.model) {
+      parts.push(`\n**Mô hình:** \`${result.model}\``);
+    }
+    if (result?.errorDetail) {
+      parts.push(`**Chi tiết lỗi từ Gemma:** \`${result.errorDetail}\``);
+    } else if (!response.ok) {
+      parts.push(`**Mã lỗi HTTP:** \`${response.status} ${response.statusText || ''}\``.trim());
+    }
+    throw new Error(parts.join('\n'));
+  }
+
+  if (result && typeof result.reply === 'string' && result.reply.trim().length > 0) {
+    return await streamTextInChunks(result.reply, onChunk);
+  }
+
+  throw new Error(
+    'Trợ lí AI đang trục trặc (không nhận được nội dung phản hồi từ mô hình), vui lòng quay lại sau giây lát.'
+  );
 }
 
 
