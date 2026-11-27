@@ -544,7 +544,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, status: 'AI Assistant Service Ready' });
 });
 
-// AI Document & Handwriting OCR endpoint using Gemini 3.8 Flash
+// AI Document & Handwriting OCR endpoint using Gemma 4
 app.post('/api/ocr-document', async (req: Request, res: Response) => {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
@@ -595,7 +595,7 @@ Nhiệm vụ của bạn:
 
 ${studentNamesContext}
 
-Hãy phản hồi DUY NHẤT dưới dạng JSON theo cấu trúc:
+Hãy phản hồi DUY NHẤT dưới dạng JSON thuần (không thêm markdown \`\`\` hay giải thích ngoài JSON) theo cấu trúc:
 {
   "detectedStudentName": "Tên học sinh",
   "matchedStudentId": "ID nếu khớp",
@@ -608,24 +608,49 @@ Hãy phản hồi DUY NHẤT dưới dạng JSON theo cấu trúc:
   "fullText": "Toàn bộ văn bản đã đọc"
 }`;
 
+    const parseJsonSafe = (rawText?: string | null) => {
+      if (!rawText) return null;
+      const trimmed = rawText.trim();
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+        if (fenced?.[1]) {
+          try {
+            return JSON.parse(fenced[1].trim());
+          } catch {
+            // Fall through to brace extraction
+          }
+        }
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+        }
+        return null;
+      }
+    };
+
     const client = getServerGeminiClient();
 
     let ocrResult: any = null;
     if (client) {
-      try {
-        const response = await client.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: { parts: [imagePart, { text: promptText }] },
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
+      const modelsToTry = [PRIMARY_MODEL, SECONDARY_MODEL];
+      for (const modelName of modelsToTry) {
+        try {
+          const response = await client.models.generateContent({
+            model: modelName,
+            contents: { parts: [imagePart, { text: promptText }] },
+          });
 
-        if (response.text) {
-          ocrResult = JSON.parse(response.text.trim());
+          const parsed = parseJsonSafe(response.text);
+          if (parsed) {
+            ocrResult = parsed;
+            break;
+          }
+        } catch (genAiErr) {
+          console.warn(`Gemma OCR generation error (${modelName}):`, genAiErr);
         }
-      } catch (genAiErr) {
-        console.warn('Gemini OCR generation error, applying fallback:', genAiErr);
       }
     } else {
       console.warn('Neither GEMINI_API_KEY nor VITE_GEMINI_API_KEY is configured for /api/ocr-document.');
