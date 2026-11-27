@@ -76,6 +76,8 @@ interface MailboxViewProps {
   systemConfig?: SchoolSystemConfig;
   supplementalRequests?: SupplementalScoreRequest[];
   initialSubTab?: 'reports' | 'suggestions' | 'supplemental';
+  preloadedReports?: ScoreReport[];
+  preloadedSuggestions?: FeatureSuggestion[];
 }
 
 export const MailboxView: React.FC<MailboxViewProps> = ({
@@ -90,6 +92,8 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
   systemConfig,
   supplementalRequests = [],
   initialSubTab,
+  preloadedReports,
+  preloadedSuggestions,
 }) => {
   const { currentUser, isAllPermitted, isTeacherOrAdmin } = useAuth();
   const shouldHideScores = Boolean(systemConfig?.hideRankingScores && !isTeacherOrAdmin);
@@ -112,9 +116,13 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
   const [activeSubTab, setActiveSubTab] = useState<'reports' | 'suggestions' | 'supplemental'>(
     initialSubTab || 'reports'
   );
-  const [reports, setReports] = useState<ScoreReport[]>([]);
-  const [suggestions, setSuggestions] = useState<FeatureSuggestion[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [internalReports, setInternalReports] = useState<ScoreReport[]>([]);
+  const [internalSuggestions, setInternalSuggestions] = useState<FeatureSuggestion[]>([]);
+  const [loading, setLoading] = useState<boolean>(
+    preloadedReports === undefined && preloadedSuggestions === undefined
+  );
+  const reports = preloadedReports ?? internalReports;
+  const suggestions = preloadedSuggestions ?? internalSuggestions;
 
   // Modals state
   const [isCreateReportOpen, setIsCreateReportOpen] = useState<boolean>(false);
@@ -167,22 +175,27 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
     }
   }, [selectedClassId]);
 
-  // Real-time subscriptions
+  // Real-time subscriptions (only used as fallback if parent did not preload data)
   React.useEffect(() => {
+    if (preloadedReports !== undefined && preloadedSuggestions !== undefined) {
+      setLoading(false);
+      return;
+    }
+
     const unsubReports = subscribeScoreReports((data) => {
-      setReports(data);
+      setInternalReports(data);
       setLoading(false);
     });
 
     const unsubSuggestions = subscribeFeatureSuggestions((data) => {
-      setSuggestions(data);
+      setInternalSuggestions(data);
     });
 
     return () => {
       unsubReports();
       unsubSuggestions();
     };
-  }, []);
+  }, [preloadedReports !== undefined, preloadedSuggestions !== undefined]);
 
   const isAdmin = currentUser?.role === 'admin';
   const canApproveSupplemental = canApproveSupplementalRequests(currentUser?.role);

@@ -11,6 +11,8 @@ import {
   SchoolSystemConfig,
   SchoolClass,
   SupplementalScoreRequest,
+  ScoreReport,
+  FeatureSuggestion,
 } from '../types.ts';
 import { AppTab } from '../utils/router.ts';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -153,6 +155,8 @@ interface MobileScoreViewProps {
   parentDocRequirements: ParentDocRequirement[];
   parentSubmissions: ParentSubmission[];
   studentConfessions: StudentConfession[];
+  scoreReports?: ScoreReport[];
+  featureSuggestions?: FeatureSuggestion[];
   onOpenNotifications: () => void;
   onOpenCreateNotif: () => void;
   onOpenRules: () => void;
@@ -193,6 +197,8 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   parentDocRequirements,
   parentSubmissions,
   studentConfessions,
+  scoreReports,
+  featureSuggestions,
   onOpenNotifications,
   onOpenCreateNotif,
   onOpenRules,
@@ -1172,6 +1178,8 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                   systemConfig={systemConfig}
                   supplementalRequests={supplementalRequests}
                   initialSubTab={mailboxSubTab}
+                  preloadedReports={scoreReports}
+                  preloadedSuggestions={featureSuggestions}
                 />
               )}
 

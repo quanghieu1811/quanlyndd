@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { ThemeProvider, useTheme } from './context/ThemeContext.tsx';
 import {
@@ -13,9 +13,10 @@ import {
   SchoolSystemConfig,
   SchoolClass,
   SupplementalScoreRequest,
+  ScoreReport,
+  FeatureSuggestion,
 } from './types.ts';
 import {
-  getStudents,
   subscribeStudents,
   subscribePointRecords,
   subscribeNotifications,
@@ -27,10 +28,11 @@ import {
   subscribeStudentConfessions,
   subscribeSystemConfig,
   subscribeSupplementalScoreRequests,
+  subscribeScoreReports,
+  subscribeFeatureSuggestions,
   canApproveSupplementalRequests,
   DEFAULT_SYSTEM_CONFIG,
   finalizeAutoLock,
-  initializeDatabase,
 } from './services/db.ts';
 import { Navbar } from './components/Navbar.tsx';
 import { GroupScoreView } from './components/GroupScoreView.tsx';
@@ -104,9 +106,45 @@ function MainContent() {
   const [systemConfig, setSystemConfig] = useState<SchoolSystemConfig>(DEFAULT_SYSTEM_CONFIG);
   const [isSystemSettingsOpen, setIsSystemSettingsOpen] = useState<boolean>(false);
 
-  // Initialize database once on mount
+  const [scoreReports, setScoreReports] = useState<ScoreReport[]>([]);
+  const [featureSuggestions, setFeatureSuggestions] = useState<FeatureSuggestion[]>([]);
+
+  // Track initial one-time preload of all collections when website opens
+  const initialLoadedStreamsRef = useRef<Set<string>>(new Set());
+  const hasCompletedInitialLoadRef = useRef<boolean>(false);
+  const markStreamLoaded = (streamKey: string) => {
+    if (hasCompletedInitialLoadRef.current) return;
+    initialLoadedStreamsRef.current.add(streamKey);
+    const requiredStreams = [
+      'systemConfig',
+      'students',
+      'rules',
+      'records',
+      'notifications',
+      'supplementalRequests',
+      'parentDocRequirements',
+      'parentSubmissions',
+      'studentConfessions',
+      'scoreReports',
+      'featureSuggestions',
+      'weekLocks',
+      'allWeekLocks',
+    ];
+    if (requiredStreams.every((k) => initialLoadedStreamsRef.current.has(k))) {
+      hasCompletedInitialLoadRef.current = true;
+      setDataLoading(false);
+    }
+  };
+
+  // Safety timeout so offline/slow collections never leave the initial loading screen stuck
   useEffect(() => {
-    initializeDatabase().catch((err: any) => console.error('Database initialization failed:', err));
+    const timer = setTimeout(() => {
+      if (!hasCompletedInitialLoadRef.current) {
+        hasCompletedInitialLoadRef.current = true;
+        setDataLoading(false);
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
   }, []);
 
   // Auto switch class when user logs in if user has an assigned classId
@@ -369,166 +407,95 @@ function MainContent() {
     }
   }, [currentUser]);
 
-  // 1. Always load System Config (1 document)
+  // 1. Eagerly load ALL global datasets once when website opens (no lazy-loading on tab/modal click)
   useEffect(() => {
-    const unsub = subscribeSystemConfig((cfg) => {
+    const unsubConfig = subscribeSystemConfig((cfg) => {
       setSystemConfig(cfg);
+      markStreamLoaded('systemConfig');
     });
-    return () => {
-      if (unsub) unsub();
-    };
-  }, []);
-
-  // 2. Lazy load Students & Scoring Rules (scoped to selectedClassId)
-  useEffect(() => {
-    const needsStudentsOrRules =
-      isMobileViewport ||
-      Boolean(currentUser) ||
-      activeTab !== 'welcome' ||
-      isStudentManagementOpen ||
-      isRulesManagementOpen ||
-      isRulesModalOpen ||
-      isAiAssistantOpen;
-
-    if (!needsStudentsOrRules) return;
-
-    const unsubStudents = subscribeStudents((newStudents) => {
-      setStudents(newStudents);
-    }, selectedClassId);
-
-    const unsubRules = subscribeScoringRules((newRules) => {
-      setRules(newRules);
-    }, selectedClassId);
-
-    return () => {
-      if (unsubStudents) unsubStudents();
-      if (unsubRules) unsubRules();
-    };
-  }, [
-    isMobileViewport,
-    selectedClassId,
-    activeTab,
-    currentUser,
-    isStudentManagementOpen,
-    isRulesManagementOpen,
-    isRulesModalOpen,
-    isAiAssistantOpen,
-  ]);
-
-  // 3. Lazy load Point Records (scoped to selectedClassId)
-  useEffect(() => {
-    const needsRecords =
-      isMobileViewport ||
-      [
-        'group_1',
-        'group_2',
-        'group_3',
-        'group_4',
-        'class_ranking',
-        'monthly_ranking',
-        'student_progress',
-        'dashboard',
-        'export_results',
-        'mailbox',
-      ].includes(activeTab) ||
-      isAiAssistantOpen;
-
-    if (!needsRecords) {
-      setDataLoading(false);
-      return;
-    }
-
-    const unsubRecords = subscribePointRecords((newRecords) => {
-      setRecords(newRecords);
-      setDataLoading(false);
-    }, selectedClassId);
-
-    return () => {
-      if (unsubRecords) unsubRecords();
-    };
-  }, [isMobileViewport, selectedClassId, activeTab, isAiAssistantOpen]);
-
-  // 4. Lazy load Notifications (also live for logged-in users to show badge updates)
-  useEffect(() => {
-    const needsNotifs =
-      Boolean(currentUser) || isNotifsCenterOpen || isCreateNotifOpen || activeTab === 'mailbox';
-    if (!needsNotifs) return;
 
     const unsubNotifs = subscribeNotifications((newNotifs) => {
       setNotifications(newNotifs);
+      markStreamLoaded('notifications');
     });
-
-    return () => {
-      if (unsubNotifs) unsubNotifs();
-    };
-  }, [currentUser, isNotifsCenterOpen, isCreateNotifOpen, activeTab]);
-
-  // 4b. Subscribe to Supplemental Score Requests when logged in
-  useEffect(() => {
-    if (!currentUser) {
-      setSupplementalRequests([]);
-      return;
-    }
 
     const unsubSupp = subscribeSupplementalScoreRequests((list) => {
       setSupplementalRequests(list);
+      markStreamLoaded('supplementalRequests');
     });
-
-    return () => {
-      if (unsubSupp) unsubSupp();
-    };
-  }, [currentUser]);
-
-  // 5. Lazy load Parent Submissions & Requirements (Mục 6)
-  useEffect(() => {
-    if (activeTab !== 'parent_submissions') return;
 
     const unsubDocReqs = subscribeParentDocRequirements((newReqs) => {
       setParentDocRequirements(newReqs);
+      markStreamLoaded('parentDocRequirements');
     });
 
     const unsubParentSubs = subscribeParentSubmissions((newSubs) => {
       setParentSubmissions(newSubs);
+      markStreamLoaded('parentSubmissions');
     });
-
-    return () => {
-      if (unsubDocReqs) unsubDocReqs();
-      if (unsubParentSubs) unsubParentSubs();
-    };
-  }, [activeTab]);
-
-  // 6. Lazy load Student Confessions (Mục 7)
-  useEffect(() => {
-    if (activeTab !== 'student_confessions') return;
 
     const unsubConfessions = subscribeStudentConfessions((newConfessions) => {
       setStudentConfessions(newConfessions);
+      markStreamLoaded('studentConfessions');
     });
 
-    return () => {
-      if (unsubConfessions) unsubConfessions();
-    };
-  }, [activeTab]);
-
-  // Subscribe to week locks specific to selectedClassId
-  useEffect(() => {
-    const unsub = subscribeWeekLocks(selectedClassId, (newLocks) => {
-      setWeekLocks(newLocks);
+    const unsubReports = subscribeScoreReports((newReports) => {
+      setScoreReports(newReports);
+      markStreamLoaded('scoreReports');
     });
-    return () => {
-      if (unsub) unsub();
-    };
-  }, [selectedClassId]);
 
-  // Subscribe to ALL week locks for the global background sweeper
-  useEffect(() => {
-    const unsub = subscribeAllWeekLocks((newAllLocks) => {
+    const unsubSuggestions = subscribeFeatureSuggestions((newSuggestions) => {
+      setFeatureSuggestions(newSuggestions);
+      markStreamLoaded('featureSuggestions');
+    });
+
+    const unsubAllLocks = subscribeAllWeekLocks((newAllLocks) => {
       setAllWeekLocks(newAllLocks);
+      markStreamLoaded('allWeekLocks');
     });
+
     return () => {
-      if (unsub) unsub();
+      if (unsubConfig) unsubConfig();
+      if (unsubNotifs) unsubNotifs();
+      if (unsubSupp) unsubSupp();
+      if (unsubDocReqs) unsubDocReqs();
+      if (unsubParentSubs) unsubParentSubs();
+      if (unsubConfessions) unsubConfessions();
+      if (unsubReports) unsubReports();
+      if (unsubSuggestions) unsubSuggestions();
+      if (unsubAllLocks) unsubAllLocks();
     };
   }, []);
+
+  // 2. Eagerly load class-scoped datasets (Students, Scoring Rules, Point Records, Week Locks) immediately
+  useEffect(() => {
+    const unsubStudents = subscribeStudents((newStudents) => {
+      setStudents(newStudents);
+      markStreamLoaded('students');
+    }, selectedClassId);
+
+    const unsubRules = subscribeScoringRules((newRules) => {
+      setRules(newRules);
+      markStreamLoaded('rules');
+    }, selectedClassId);
+
+    const unsubRecords = subscribePointRecords((newRecords) => {
+      setRecords(newRecords);
+      markStreamLoaded('records');
+    }, selectedClassId);
+
+    const unsubLocks = subscribeWeekLocks(selectedClassId, (newLocks) => {
+      setWeekLocks(newLocks);
+      markStreamLoaded('weekLocks');
+    });
+
+    return () => {
+      if (unsubStudents) unsubStudents();
+      if (unsubRules) unsubRules();
+      if (unsubRecords) unsubRecords();
+      if (unsubLocks) unsubLocks();
+    };
+  }, [selectedClassId]);
 
   // Lazy Auto-Lock Sweeper: Solidifies dynamic deadlines into permanent locks in Firestore
   // Lazy Auto-Lock Sweeper: Solidifies dynamic deadlines into permanent locks in Firestore
@@ -681,7 +648,7 @@ function MainContent() {
         <div className="text-center space-y-3">
           <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
           <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
-            Đang kết nối cơ sở dữ liệu Firebase Firestore...
+            Đang tải toàn bộ dữ liệu hệ thống từ Firebase Firestore...
           </p>
         </div>
       </div>
@@ -724,6 +691,8 @@ function MainContent() {
           studentConfessions={studentConfessions.filter(
             (c) => (c.classId || '8A1') === selectedClassId
           )}
+          scoreReports={scoreReports}
+          featureSuggestions={featureSuggestions}
           onOpenNotifications={handleOpenNotifications}
           onOpenCreateNotif={() => {
             if (!currentUser) {
@@ -1040,6 +1009,8 @@ function MainContent() {
             systemConfig={systemConfig}
             supplementalRequests={supplementalRequests}
             initialSubTab={mailboxSubTab}
+            preloadedReports={scoreReports}
+            preloadedSuggestions={featureSuggestions}
           />
         )}
 
