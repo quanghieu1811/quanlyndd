@@ -30,6 +30,15 @@ import {
   Lock,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
+import {
+  isGlobalRankingHidden,
+  getHiddenWeeksSet,
+  isMonthHidden2_2ForUser,
+  isMyChildStudent,
+  MASK_SCORE,
+  MASK_RANK,
+  MASK_STUDENT_NAME,
+} from '../utils/privacyMasking.ts';
 
 interface MonthlyRankingViewProps {
   currentWeek: number;
@@ -54,20 +63,15 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
   selectedClass,
   systemConfig,
 }) => {
-  const { currentUser, isTeacherOrAdmin, canManageGroup } = useAuth();
+  const { currentUser, isTeacherOrAdmin } = useAuth();
   const isPhhs = currentUser?.role === 'phhs';
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (currentUser.studentName && stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()) return true;
-    return false;
-  };
-  const shouldHideScores = systemConfig?.hideRankingScores && !isTeacherOrAdmin;
-  const isGroupDataHidden = (gNum: number) => {
-    if (isTeacherOrAdmin) return false;
-    if (canManageGroup(gNum)) return false;
-    return Boolean(shouldHideScores);
-  };
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
+
+  const hiddenGlobal = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = useMemo(
+    () => getHiddenWeeksSet(selectedClass, isTeacherOrAdmin),
+    [selectedClass, isTeacherOrAdmin]
+  );
 
   const className = selectedClass?.name || (students[0]?.classId ? `Lớp ${students[0].classId}` : 'Lớp 8A1');
   const classNameUpper = className.toUpperCase();
@@ -81,6 +85,9 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
   const [selectedStudentForProgress, setSelectedStudentForProgress] = useState<Student | null>(null);
   const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
 
+  const isMonthHidden = isMonthHidden2_2ForUser(selectedMonth, selectedClass, isTeacherOrAdmin);
+  const effectiveHideData = hiddenGlobal || isMonthHidden;
+
   const activeMonthInfo: AcademicMonthInfo = useMemo(() => {
     return (
       ACADEMIC_MONTHS.find((m) => m.month === selectedMonth) ||
@@ -88,14 +95,17 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
     );
   }, [selectedMonth]);
 
-  // Filter records belonging to the selected academic month (where all weeks in activeMonthInfo.weeks belong to this month)
+  // Filter records belonging to the selected academic month excluding hidden weeks for non-admin/teacher
   const monthRecords = useMemo(() => {
+    if (effectiveHideData) return [];
     const targetWeeks = activeMonthInfo.weeks;
-    return records.filter((r) => targetWeeks.includes(r.week) && r.week <= currentWeek);
-  }, [records, activeMonthInfo, currentWeek]);
+    return records.filter(
+      (r) => targetWeeks.includes(r.week) && r.week <= currentWeek && !hiddenWeeksSet.has(r.week)
+    );
+  }, [records, activeMonthInfo, currentWeek, effectiveHideData, hiddenWeeksSet]);
 
   // 1. Group Monthly Rankings
-  // Formula: Điểm trung bình tháng của tổ = Tổng điểm tháng của tổ / Số học sinh của tổ (9 học sinh / tổ)
+  // Formula: Điểm trung bình tháng của tổ = Tổng điểm tháng của tổ / Số học sinh của tổ
   const groupMonthlyRankings = useMemo(() => {
     const list = [1, 2, 3, 4].map((gNum) => {
       const gStudents = students.filter((s) => s.group === gNum);
@@ -116,7 +126,9 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
       
       const totalScore = gStudents.reduce((sum, s) => {
         const sBase = s.baseScore ?? classBaseScore;
-        const sWeeks = activeMonthInfo.weeks.filter((w) => w <= currentWeek && w >= (s.startWeek || 1)).length;
+        const sWeeks = activeMonthInfo.weeks.filter(
+          (w) => w <= currentWeek && w >= (s.startWeek || 1) && !hiddenWeeksSet.has(w)
+        ).length;
         const sMonthBase = sBase * sWeeks;
         const sPlus = gRecords.filter(r => (r.studentId === s.id || r.studentName === s.name) && r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
         const sMinus = gRecords.filter(r => (r.studentId === s.id || r.studentName === s.name) && r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
@@ -127,6 +139,10 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
 
       // Week by week breakdown in this month
       const weeklyBreakdown = activeMonthInfo.weeks.map((w) => {
+        const isWeekMasked = effectiveHideData || hiddenWeeksSet.has(w);
+        if (isWeekMasked) {
+          return { week: w, score: 0, avg: 0, isHidden: true };
+        }
         const sWeeksCount = gStudents.filter(s => w >= (s.startWeek || 1)).length || 9;
         const wRecords = records.filter((r) => 
           r.week === w && (gStudentIds.has(r.studentId) || gStudentNames.has(r.studentName))
@@ -142,7 +158,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
 
         const score = hasStarted ? (wBaseTotal + plus - minus) : 0;
         const avg = hasStarted ? Number((score / sWeeksCount).toFixed(2)) : 0;
-        return { week: w, score, avg };
+        return { week: w, score, avg, isHidden: false };
       });
 
       return {
@@ -157,6 +173,14 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
       };
     });
 
+    if (effectiveHideData) {
+      list.sort((a, b) => a.group - b.group);
+      return list.map((g) => ({
+        ...g,
+        rank: 0,
+      }));
+    }
+
     // Sort by averageScore descending, then totalScore
     list.sort((a, b) => b.averageScore - a.averageScore || b.totalScore - a.totalScore);
 
@@ -168,10 +192,11 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
           (other) => other.averageScore === g.averageScore && other.totalScore === g.totalScore
         ) + 1,
     }));
-  }, [students, monthRecords, records, activeMonthInfo, selectedClass, currentWeek]);
+  }, [students, monthRecords, records, activeMonthInfo, selectedClass, currentWeek, effectiveHideData, hiddenWeeksSet]);
 
-  // 2. Top Students of the Month across Class 8A1
+  // 2. Top Students of the Month across Class
   const topStudentsMonth = useMemo(() => {
+    if (effectiveHideData) return [];
     const studentScoreMap = students.map((stu) => {
       const stuRecords = monthRecords.filter(
         (r) => r.studentId === stu.id || r.studentName === stu.name
@@ -180,7 +205,9 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
       const minus = stuRecords.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
       const classBaseScore = selectedClass?.baseScore ?? 100;
       const baseScore = stu.baseScore ?? classBaseScore;
-      const weeksActive = activeMonthInfo.weeks.filter((w) => w <= currentWeek && w >= (stu.startWeek || 1)).length;
+      const weeksActive = activeMonthInfo.weeks.filter(
+        (w) => w <= currentWeek && w >= (stu.startWeek || 1) && !hiddenWeeksSet.has(w)
+      ).length;
       const score = (baseScore * weeksActive) + plus - minus;
       return {
         student: stu,
@@ -200,7 +227,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
     }));
 
     return withRank.slice(0, 10);
-  }, [students, monthRecords, selectedClass, activeMonthInfo, currentWeek]);
+  }, [students, monthRecords, selectedClass, activeMonthInfo, currentWeek, effectiveHideData, hiddenWeeksSet]);
 
   const handlePrint = () => {
     window.print();
@@ -227,10 +254,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
     }
   };
 
-  const championGroup = groupMonthlyRankings.find((g) => g.rank === 1);
-
-  const isMonthHidden = Boolean(selectedClass?.hiddenMonths2_2?.includes(selectedMonth));
-  const effectiveHideData = (shouldHideScores || isMonthHidden) && !isTeacherOrAdmin;
+  const championGroup = effectiveHideData ? undefined : groupMonthlyRankings.find((g) => g.rank === 1);
 
   return (
     <div className="space-y-6">
@@ -347,7 +371,13 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
 
             {onViewStudentProgress && (
               <button
-                onClick={() => onViewStudentProgress(topStudentsMonth[0]?.student || students[0])}
+                onClick={() =>
+                  onViewStudentProgress(
+                    effectiveHideData || isPhhs
+                      ? students.find((s) => isMyChild(s)) || students[0]
+                      : topStudentsMonth[0]?.student || students[0]
+                  )
+                }
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition cursor-pointer"
                 title="Xem Biểu Đồ & Lịch Sử Thi Đua Từng Học Sinh Qua Các Tuần"
               >
@@ -356,13 +386,15 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
               </button>
             )}
 
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-            >
-              <Printer className="w-3.5 h-3.5 text-slate-600" />
-              In Báo cáo Tháng
-            </button>
+            {!effectiveHideData && !isPhhs && (
+              <button
+                onClick={handlePrint}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-600" />
+                In Báo cáo Tháng
+              </button>
+            )}
           </div>
         </div>
 
@@ -419,7 +451,21 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
         </div>
 
         {/* Month Champion Spotlight Banner */}
-        {championGroup && (
+        {effectiveHideData ? (
+          <div className="mt-5 p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-xs font-black text-amber-900 dark:text-amber-200 block">
+                Danh Hiệu Cờ Thi Đua {activeMonthInfo.label} Đang Được Bảo Mật
+              </span>
+              <span className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                Thông tin tổ dẫn đầu và điểm số tháng được tạm ẩn theo thiết lập của GVCN / Quản trị viên.
+              </span>
+            </div>
+          </div>
+        ) : championGroup ? (
           <div className="mt-5 p-4 rounded-2xl bg-linear-to-r from-amber-500/15 via-amber-400/10 to-amber-500/5 dark:from-amber-950/40 dark:via-amber-900/20 dark:to-slate-900/40 border border-amber-300 dark:border-amber-600/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-amber-400 text-amber-950 flex items-center justify-center font-black shrink-0 shadow-xs">
@@ -441,33 +487,33 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
             </div>
 
             <div className="flex items-center gap-4 bg-white/90 dark:bg-slate-900/90 px-4 py-2 rounded-xl border border-amber-200/80 dark:border-amber-700/60 self-start sm:self-auto shrink-0">
-            <div className="text-right">
-              <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-300 block">
-                Điểm TB Tháng
-              </span>
-              <span className={`text-base font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-amber-600 dark:text-amber-400'}`}>
-                {effectiveHideData ? '???' : (championGroup.averageScore > 0 ? `+${championGroup.averageScore}` : championGroup.averageScore)} đ/bạn
-              </span>
-            </div>
-            <div className="w-px h-8 bg-amber-200 dark:bg-amber-800" />
-            <div className="text-right">
-              <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-300 block">
-                Tổng điểm
-              </span>
-              <span className={`text-base font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-slate-800 dark:text-white'}`}>
-                {effectiveHideData ? '???' : (championGroup.totalScore > 0 ? `+${championGroup.totalScore}` : championGroup.totalScore)} đ
-              </span>
-            </div>
+              <div className="text-right">
+                <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-300 block">
+                  Điểm TB Tháng
+                </span>
+                <span className="text-base font-black text-amber-600 dark:text-amber-400">
+                  {championGroup.averageScore > 0 ? `+${championGroup.averageScore}` : championGroup.averageScore} đ/bạn
+                </span>
+              </div>
+              <div className="w-px h-8 bg-amber-200 dark:bg-amber-800" />
+              <div className="text-right">
+                <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-300 block">
+                  Tổng điểm
+                </span>
+                <span className="text-base font-black text-slate-800 dark:text-white">
+                  {championGroup.totalScore > 0 ? `+${championGroup.totalScore}` : championGroup.totalScore} đ
+                </span>
+              </div>
             </div>
           </div>
-        )}
+        ) : null}
 
         {/* Podium visualization of the 4 groups for the month */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-5 pt-4 border-t border-slate-100 dark:border-slate-700">
           {groupMonthlyRankings.map((g) => {
-            const isFirst = g.rank === 1;
-            const isSecond = g.rank === 2;
-            const isThird = g.rank === 3;
+            const isFirst = !effectiveHideData && g.rank === 1;
+            const isSecond = !effectiveHideData && g.rank === 2;
+            const isThird = !effectiveHideData && g.rank === 3;
 
             return (
               <div
@@ -475,7 +521,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                 onClick={() => !effectiveHideData ? onSelectGroup(g.group) : null}
                 className={`p-4 rounded-2xl border transition relative flex flex-col justify-between group ${
                   effectiveHideData
-                    ? 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'
+                    ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
                     : isFirst
                     ? 'bg-linear-to-b from-amber-500/15 to-white dark:from-amber-950/30 dark:to-slate-900/50 border-amber-400 dark:border-amber-500/70 shadow-sm cursor-pointer'
                     : isSecond
@@ -490,7 +536,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                     <span
                       className={`w-7 h-7 rounded-xl font-black flex items-center justify-center text-xs shadow-2xs ${
                         effectiveHideData
-                          ? 'bg-slate-100 text-slate-300'
+                          ? 'bg-slate-100 text-slate-400'
                           : isFirst
                           ? 'bg-amber-400 text-amber-950'
                           : isSecond
@@ -500,7 +546,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                           : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                       }`}
                     >
-                      {effectiveHideData ? '?' : `#${g.rank}`}
+                      {effectiveHideData ? MASK_RANK : `#${g.rank}`}
                     </span>
                     <span className="text-[11px] font-bold text-slate-500 dark:text-slate-300 flex items-center gap-1">
                       <Users className="w-3 h-3 text-slate-400 dark:text-slate-300" />
@@ -521,16 +567,16 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                     </span>
                     <span
                       className={`text-xl font-black ${
-                        effectiveHideData ? 'text-slate-300 blur-xs' : (g.averageScore > 0
+                        effectiveHideData ? 'text-slate-400' : (g.averageScore > 0
                           ? 'text-emerald-600 dark:text-emerald-400'
                           : g.averageScore < 0
                           ? 'text-rose-600 dark:text-rose-400'
                           : 'text-slate-700 dark:text-slate-200')
                       }`}
                     >
-                      {effectiveHideData ? '???' : (g.averageScore > 0 ? `+${g.averageScore}` : g.averageScore)}
+                      {effectiveHideData ? MASK_SCORE : (g.averageScore > 0 ? `+${g.averageScore}` : g.averageScore)}
                       <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 ml-1">
-                        đ/bạn
+                        {effectiveHideData ? '(Bảo mật)' : 'đ/bạn'}
                       </span>
                     </span>
                   </div>
@@ -539,14 +585,14 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                 <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-semibold">
                   <span className="text-emerald-700 flex items-center gap-1">
                     <TrendingUp className="w-3 h-3" />
-                    +{g.totalPlus}
+                    {effectiveHideData ? MASK_SCORE : `+${g.totalPlus}`}
                   </span>
                   <span className="text-rose-700 flex items-center gap-1">
                     <TrendingDown className="w-3 h-3" />
-                    -{g.totalMinus}
+                    {effectiveHideData ? MASK_SCORE : `-${g.totalMinus}`}
                   </span>
-                  <span className={`font-bold ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-slate-800'}`}>
-                    Tổng: {effectiveHideData ? '???' : (g.totalScore > 0 ? `+${g.totalScore}` : g.totalScore)}đ
+                  <span className={`font-bold ${effectiveHideData ? 'text-slate-400' : 'text-slate-800'}`}>
+                    Tổng: {effectiveHideData ? MASK_SCORE : `${g.totalScore > 0 ? `+${g.totalScore}` : g.totalScore}đ`}
                   </span>
                 </div>
               </div>
@@ -564,7 +610,9 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
               Bảng Tổng Hợp Điểm Xếp Hạng 4 Tổ - {activeMonthInfo.label}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Bao gồm {activeMonthInfo.weekRangeText} ({monthRecords.length} lượt ghi nhận điểm thi đua)
+              {effectiveHideData
+                ? `Bao gồm ${activeMonthInfo.weekRangeText} (Dữ liệu đang tạm ẩn)`
+                : `Bao gồm ${activeMonthInfo.weekRangeText} (${monthRecords.length} lượt ghi nhận điểm thi đua)`}
             </p>
           </div>
 
@@ -596,16 +644,18 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-100">
               {groupMonthlyRankings.map((g) => {
-                const isChampion = g.rank === 1;
+                const isChampion = !effectiveHideData && g.rank === 1;
 
-                let badgeColor = 'bg-slate-100 text-slate-700';
-                let ratingText = 'Tổ Tiên Tiến';
-                if (g.averageScore >= 5) {
-                  badgeColor = 'bg-emerald-100 text-emerald-800 border border-emerald-300';
-                  ratingText = 'Tổ Xuất Sắc';
-                } else if (g.averageScore < 0) {
-                  badgeColor = 'bg-rose-100 text-rose-800 border border-rose-300';
-                  ratingText = 'Cần Cố Gắng';
+                let badgeColor = effectiveHideData ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-700';
+                let ratingText = effectiveHideData ? 'Bảo mật' : 'Tổ Tiên Tiến';
+                if (!effectiveHideData) {
+                  if (g.averageScore >= 5) {
+                    badgeColor = 'bg-emerald-100 text-emerald-800 border border-emerald-300';
+                    ratingText = 'Tổ Xuất Sắc';
+                  } else if (g.averageScore < 0) {
+                    badgeColor = 'bg-rose-100 text-rose-800 border border-rose-300';
+                    ratingText = 'Cần Cố Gắng';
+                  }
                 }
 
                 return (
@@ -619,7 +669,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                       <span
                         className={`inline-flex items-center justify-center w-7 h-7 rounded-xl font-black text-xs ${
                           effectiveHideData
-                            ? 'bg-slate-50 text-slate-300 border border-slate-100'
+                            ? 'bg-slate-100 text-slate-400 border border-slate-200'
                             : g.rank === 1
                             ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
                             : g.rank === 2
@@ -629,7 +679,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                             : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold'
                         }`}
                       >
-                        {effectiveHideData ? '?' : g.rank}
+                        {effectiveHideData ? MASK_RANK : g.rank}
                       </span>
                     </td>
                     <td className="py-3.5 px-4 font-bold text-slate-800">
@@ -645,18 +695,18 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                     <td className="py-3.5 px-3 text-center text-slate-600 font-semibold">
                       {g.studentCount}
                     </td>
-                    <td className={`py-3.5 px-3 text-center font-bold text-emerald-600 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                      {effectiveHideData ? '???' : (g.totalPlus > 0 ? `+${g.totalPlus}` : g.totalPlus)}
+                    <td className={`py-3.5 px-3 text-center font-bold ${effectiveHideData ? 'text-slate-400' : 'text-emerald-600'}`}>
+                      {effectiveHideData ? MASK_SCORE : (g.totalPlus > 0 ? `+${g.totalPlus}` : g.totalPlus)}
                     </td>
-                    <td className={`py-3.5 px-3 text-center font-bold text-rose-600 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                      {effectiveHideData ? '???' : (g.totalMinus > 0 ? `-${g.totalMinus}` : g.totalMinus)}
+                    <td className={`py-3.5 px-3 text-center font-bold ${effectiveHideData ? 'text-slate-400' : 'text-rose-600'}`}>
+                      {effectiveHideData ? MASK_SCORE : (g.totalMinus > 0 ? `-${g.totalMinus}` : g.totalMinus)}
                     </td>
-                    <td className={`py-3.5 px-3 text-center font-black text-slate-900 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                      {effectiveHideData ? '???' : (g.totalScore > 0 ? `+${g.totalScore}` : g.totalScore)}
+                    <td className={`py-3.5 px-3 text-center font-black ${effectiveHideData ? 'text-slate-400' : 'text-slate-900'}`}>
+                      {effectiveHideData ? MASK_SCORE : (g.totalScore > 0 ? `+${g.totalScore}` : g.totalScore)}
                     </td>
                     <td className="py-3.5 px-4 text-center">
-                      <span className={`inline-block px-3 py-1 rounded-xl font-black text-sm ${effectiveHideData ? 'bg-slate-50 text-slate-300' : 'bg-blue-50 text-blue-800 border border-blue-200'}`}>
-                        {effectiveHideData ? '???' : (g.averageScore > 0 ? `+${g.averageScore} đ` : `${g.averageScore} đ`)}
+                      <span className={`inline-block px-3 py-1 rounded-xl font-black text-sm ${effectiveHideData ? 'bg-slate-100 text-slate-400' : 'bg-blue-50 text-blue-800 border border-blue-200'}`}>
+                        {effectiveHideData ? MASK_SCORE : (g.averageScore > 0 ? `+${g.averageScore} đ` : `${g.averageScore} đ`)}
                       </span>
                     </td>
                     <td className="py-3.5 px-3 text-center">
@@ -670,7 +720,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                         disabled={effectiveHideData}
                         className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition ${
                           effectiveHideData
-                            ? 'bg-slate-50 text-slate-300 cursor-not-allowed'
+                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                             : 'text-blue-600 hover:bg-blue-50 cursor-pointer'
                         }`}
                       >
@@ -692,40 +742,46 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
           </h4>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {groupMonthlyRankings.map((g) => (
-              <div key={g.group} className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-bold text-xs text-slate-800">{g.name}</span>
-                  <span className="text-[11px] font-black text-blue-600">
-                    TB Tháng: {g.averageScore}đ
-                  </span>
-                </div>
-                <div className="space-y-1.5 text-xs">
-                  {g.weeklyBreakdown.map((w) => (
-                    <div
-                      key={w.week}
-                      className="flex items-center justify-between py-1 px-2 rounded-lg bg-white border border-slate-100"
-                    >
-                      <span className="text-slate-600 font-medium">Tuần {w.week}</span>
-                        <span
-                          className={`font-bold ${
-                            effectiveHideData ? 'text-slate-300 blur-xs' : (w.score > 0
-                              ? 'text-emerald-600'
-                              : w.score < 0
-                              ? 'text-rose-600'
-                              : 'text-slate-500')
-                          }`}
+            {groupMonthlyRankings.map((g) => {
+              const hasHiddenWeekInMonth = effectiveHideData || g.weeklyBreakdown.some((wb) => wb.isHidden);
+              return (
+                <div key={g.group} className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-bold text-xs text-slate-800">{g.name}</span>
+                    <span className={`text-[11px] font-black ${hasHiddenWeekInMonth ? 'text-slate-400' : 'text-blue-600'}`}>
+                      TB Tháng: {hasHiddenWeekInMonth ? MASK_SCORE : `${g.averageScore}đ`}
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    {g.weeklyBreakdown.map((w) => {
+                      const maskWeek = effectiveHideData || w.isHidden;
+                      return (
+                        <div
+                          key={w.week}
+                          className="flex items-center justify-between py-1 px-2 rounded-lg bg-white border border-slate-100"
                         >
-                          {effectiveHideData ? '???' : (w.avg > 0 ? `+${w.avg} đ/bạn` : `${w.avg} đ/bạn`)}
-                          <span className="text-[10px] text-slate-400 ml-1">
-                            ({effectiveHideData ? '???' : (w.score > 0 ? `+${w.score}đ` : `${w.score}đ`)})
+                          <span className="text-slate-600 font-medium">Tuần {w.week}</span>
+                          <span
+                            className={`font-bold ${
+                              maskWeek ? 'text-slate-400' : (w.score > 0
+                                ? 'text-emerald-600'
+                                : w.score < 0
+                                ? 'text-rose-600'
+                                : 'text-slate-500')
+                            }`}
+                          >
+                            {maskWeek ? MASK_SCORE : (w.avg > 0 ? `+${w.avg} đ/bạn` : `${w.avg} đ/bạn`)}
+                            <span className="text-[10px] text-slate-400 ml-1">
+                              ({maskWeek ? 'Bảo mật' : (w.score > 0 ? `+${w.score}đ` : `${w.score}đ`)})
+                            </span>
                           </span>
-                        </span>
-                    </div>
-                  ))}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -751,7 +807,17 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
           </span>
         </div>
 
-        {topStudentsMonth.length === 0 ? (
+        {effectiveHideData ? (
+          <div className="p-8 text-center bg-amber-50/40 rounded-2xl border border-dashed border-amber-300 space-y-2">
+            <Lock className="w-8 h-8 text-amber-500 mx-auto" />
+            <h4 className="text-sm font-bold text-slate-700">
+              Bảng Vinh Danh Top 10 {activeMonthInfo.shortLabel} Đang Được Bảo Mật
+            </h4>
+            <p className="text-xs text-slate-500">
+              Thông tin xếp hạng cá nhân tháng này tạm ẩn theo thiết lập của GVCN / Quản trị viên.
+            </p>
+          </div>
+        ) : topStudentsMonth.length === 0 ? (
           <p className="text-xs text-slate-400 italic text-center py-8">
             Chưa có dữ liệu điểm số trong tháng này.
           </p>
@@ -760,7 +826,6 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
             {topStudentsMonth.map((item) => {
               const myChild = isMyChild(item.student);
               const hideForOtherPhhs = isPhhs && !myChild;
-              const maskScore = effectiveHideData || hideForOtherPhhs;
 
               return (
                 <div
@@ -794,7 +859,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                     </span>
                     <div>
                       <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 hover:text-blue-600 transition flex items-center gap-1.5 flex-wrap">
-                        {hideForOtherPhhs ? `Học sinh (Tổ ${item.student.group})` : item.student.name}
+                        {hideForOtherPhhs ? MASK_STUDENT_NAME : item.student.name}
                         {myChild && (
                           <span className="text-[10px] font-black bg-emerald-600 text-white px-2 py-0.2 rounded-full">
                             👨‍👩‍👧 Con của bạn
@@ -807,7 +872,7 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                         )}
                       </h4>
                       <span className="text-[11px] text-slate-500">
-                        Tổ {item.student.group} {item.student.roleInGroup ? `• ${item.student.roleInGroup}` : `• ${item.student.gender}`}
+                        Tổ {item.student.group} {!hideForOtherPhhs && (item.student.roleInGroup ? `• ${item.student.roleInGroup}` : `• ${item.student.gender}`)}
                       </span>
                     </div>
                   </div>
@@ -815,17 +880,17 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
                   <div className="text-right">
                     <span
                       className={`font-black text-sm block ${
-                        maskScore ? 'text-slate-400' : (item.score > 0
+                        hideForOtherPhhs ? 'text-slate-400' : (item.score > 0
                           ? 'text-emerald-600'
                           : item.score < 0
                           ? 'text-rose-600'
                           : 'text-slate-700')
                       }`}
                     >
-                      {maskScore ? '***' : (item.score > 0 ? `+${item.score} đ` : `${item.score} đ`)}
+                      {hideForOtherPhhs ? MASK_SCORE : (item.score > 0 ? `+${item.score} đ` : `${item.score} đ`)}
                     </span>
                     <span className="text-[10px] text-slate-400 font-medium">
-                      {maskScore ? '(Bảo mật)' : `+${item.plus} / -${item.minus}`}
+                      {hideForOtherPhhs ? '(Bảo mật)' : `+${item.plus} / -${item.minus}`}
                     </span>
                   </div>
                 </div>
@@ -843,6 +908,10 @@ export const MonthlyRankingView: React.FC<MonthlyRankingViewProps> = ({
         students={students}
         records={records}
         currentWeek={currentWeek}
+        shouldHideScores={effectiveHideData}
+        hiddenWeeks={Array.from(hiddenWeeksSet)}
+        selectedClass={selectedClass}
+        systemConfig={systemConfig}
         onNavigateToFullProgressView={(studentId) => {
           setIsProgressModalOpen(false);
           onViewStudentProgress?.(selectedStudentForProgress || students.find((s) => s.id === studentId) || students[0]);

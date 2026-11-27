@@ -29,6 +29,15 @@ import {
   Lock,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
+import {
+  MASK_SCORE,
+  MASK_RANK,
+  MASK_STUDENT_NAME,
+  isGlobalRankingHidden,
+  getHiddenWeeksSet,
+  isMonthHidden2_3_2ForUser,
+  isMyChildStudent,
+} from '../utils/privacyMasking.ts';
 
 interface MonthlyStudentRankingSectionProps {
   currentWeek: number;
@@ -49,7 +58,7 @@ export interface StudentMonthStat {
   netScore: number;
   baseScore: number;
   targetBaseScore: number;
-  weeklyBreakdown: { week: number; plus: number; minus: number; net: number; hasStarted: boolean; baseScore: number }[];
+  weeklyBreakdown: { week: number; plus: number; minus: number; net: number; hasStarted: boolean; baseScore: number; isHidden?: boolean }[];
   recordsCount: number;
   classRank: number;
   groupRank: number;
@@ -68,21 +77,14 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
   systemConfig,
 }) => {
   const { isDark } = useTheme();
-  const { currentUser, isTeacherOrAdmin, canManageGroup } = useAuth();
+  const { currentUser, isTeacherOrAdmin } = useAuth();
   const isPhhs = currentUser?.role === 'phhs';
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (currentUser.studentName && stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()) return true;
-    return false;
-  };
-  const shouldHideScores = systemConfig?.hideRankingScores && !isTeacherOrAdmin;
-  const isStudentScoreHidden = (stu?: Student | null) => {
-    if (!systemConfig?.hideRankingScores) return false;
-    if (isTeacherOrAdmin) return false;
-    if (stu && canManageGroup(stu.group)) return false;
-    return true;
-  };
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
+  const shouldHideScores = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = useMemo(
+    () => getHiddenWeeksSet(selectedClass, isTeacherOrAdmin),
+    [selectedClass, isTeacherOrAdmin]
+  );
   const className = selectedClass?.name || (students[0]?.classId ? `Lớp ${students[0].classId}` : 'Lớp 8A1');
   const classIdLabel = selectedClass?.id || students[0]?.classId || '8A1';
 
@@ -108,21 +110,31 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
 
   const prevMonthInfo = currentMonthIdx > 0 ? ACADEMIC_MONTHS[currentMonthIdx - 1] : null;
 
+  const isMonthHiddenBySetting = Boolean(selectedClass?.hiddenMonths2_3_2?.includes(selectedMonth));
+  const isMonthHidden = isMonthHidden2_3_2ForUser(selectedMonth, selectedClass, isTeacherOrAdmin);
+  const effectiveHideData = shouldHideScores || isMonthHidden;
+
   // Compute stats for all students in selected month and previous month
   const monthlyStats = useMemo(() => {
     const targetWeeks = activeMonthInfo.weeks;
     const prevWeeks = prevMonthInfo ? prevMonthInfo.weeks : [];
 
-    // 1. Calculate previous month rankings for delta comparison
+    // 1. Calculate previous month rankings for delta comparison (excluding hidden weeks)
     let prevRankMap: Record<string, number> = {};
-    if (prevWeeks.length > 0) {
+    const visiblePrevWeeks = prevWeeks.filter((w) => !hiddenWeeksSet.has(w));
+    if (visiblePrevWeeks.length > 0 && !isMonthHidden2_3_2ForUser(prevMonthInfo?.month || -1, selectedClass, isTeacherOrAdmin)) {
       const prevScores = students.map((stu) => {
-        const stuRecords = records.filter((r) => (r.studentId === stu.id || r.studentName === stu.name) && prevWeeks.includes(r.week) && r.week <= currentWeek);
+        const stuRecords = records.filter(
+          (r) =>
+            (r.studentId === stu.id || r.studentName === stu.name) &&
+            visiblePrevWeeks.includes(r.week) &&
+            r.week <= currentWeek
+        );
         const plus = stuRecords.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
         const minus = stuRecords.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
         const classBaseScore = selectedClass?.baseScore ?? 100;
         const baseScore = stu.baseScore ?? classBaseScore;
-        const weeksActivePrev = prevWeeks.filter(w => w <= currentWeek && w >= (stu.startWeek || 1)).length;
+        const weeksActivePrev = visiblePrevWeeks.filter((w) => w <= currentWeek && w >= (stu.startWeek || 1)).length;
         const prevTargetBaseScore = baseScore * weeksActivePrev;
         return { studentId: stu.id, net: prevTargetBaseScore + plus - minus, plus };
       });
@@ -132,30 +144,40 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
       });
     }
 
-    // 2. Calculate current month scores
+    // 2. Calculate current month scores (excluding hidden weeks for non-Teacher/Admin)
+    const visibleTargetWeeks = targetWeeks.filter((w) => !hiddenWeeksSet.has(w));
     const currentMonthScores = students.map((stu) => {
-      const stuMonthRecords = records.filter((r) => (r.studentId === stu.id || r.studentName === stu.name) && targetWeeks.includes(r.week) && r.week <= currentWeek);
+      const stuMonthRecords = records.filter(
+        (r) =>
+          (r.studentId === stu.id || r.studentName === stu.name) &&
+          visibleTargetWeeks.includes(r.week) &&
+          r.week <= currentWeek
+      );
       const plus = stuMonthRecords.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
       const minus = stuMonthRecords.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
       const classBaseScore = selectedClass?.baseScore ?? 100;
       const baseScore = stu.baseScore ?? classBaseScore;
-      const weeksActiveCurrent = targetWeeks.filter((w) => w <= currentWeek && w >= (stu.startWeek || 1)).length;
+      const weeksActiveCurrent = visibleTargetWeeks.filter((w) => w <= currentWeek && w >= (stu.startWeek || 1)).length;
       const targetBaseScore = baseScore * weeksActiveCurrent;
       const netScore = targetBaseScore + plus - minus;
 
       const weeklyBreakdown = targetWeeks.map((w) => {
-        const wRecs = records.filter((r) => (r.studentId === stu.id || r.studentName === stu.name) && r.week === w);
+        const isWeekHidden = hiddenWeeksSet.has(w);
+        const wRecs = isWeekHidden
+          ? []
+          : records.filter((r) => (r.studentId === stu.id || r.studentName === stu.name) && r.week === w);
         const wPlus = wRecs.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
         const wMinus = wRecs.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
         const hasStarted = w <= currentWeek && w >= (stu.startWeek || 1);
-        const weekNet = hasStarted ? baseScore + wPlus - wMinus : 0;
-        return { 
-          week: w, 
-          plus: wPlus, 
-          minus: wMinus, 
+        const weekNet = hasStarted && !isWeekHidden ? baseScore + wPlus - wMinus : 0;
+        return {
+          week: w,
+          plus: wPlus,
+          minus: wMinus,
           net: weekNet,
           hasStarted,
           baseScore,
+          isHidden: isWeekHidden,
         };
       });
 
@@ -243,36 +265,43 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
     });
 
     return fullList;
-  }, [students, records, activeMonthInfo, prevMonthInfo, selectedClass]);
+  }, [students, records, activeMonthInfo, prevMonthInfo, selectedClass, currentWeek, hiddenWeeksSet, isTeacherOrAdmin]);
+
+  const effectiveSortBy = useMemo(() => {
+    if (effectiveHideData || isPhhs) {
+      return sortBy === 'group' ? 'group' : 'name';
+    }
+    return sortBy;
+  }, [effectiveHideData, isPhhs, sortBy]);
 
   // Filtered & sorted student list for table
   const filteredStudents = useMemo(() => {
     let list = monthlyStats.filter((item) => {
       const matchGroup = groupFilter === 'all' || item.student?.group === groupFilter;
-      const matchSearch =
-        !searchQuery.trim() ||
-        (item.student?.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-        `tổ ${item.student?.group || ''}`.includes(searchQuery.toLowerCase());
-      return matchGroup && matchSearch;
+      const q = searchQuery.trim().toLowerCase();
+      if (!q) return matchGroup;
+      const canMatchName = !effectiveHideData && (!isPhhs || isMyChild(item.student));
+      const matchName = canMatchName && (item.student?.name || '').toLowerCase().includes(q);
+      const matchGroupQuery = `tổ ${item.student?.group || ''}`.includes(q);
+      return matchGroup && (matchName || matchGroupQuery);
     });
 
     list.sort((a, b) => {
-      if (sortBy === 'rank') return a.classRank - b.classRank;
-      if (sortBy === 'rank_desc') return b.classRank - a.classRank;
-      if (sortBy === 'name' || sortBy === 'stt') return compareStudentsByUnifiedABC(a.student, b.student);
-      if (sortBy === 'name_desc') return compareStudentsByUnifiedABC(b.student, a.student);
-      if (sortBy === 'group') return a.student.group - b.student.group || compareStudentsByUnifiedABC(a.student, b.student);
-      if (sortBy === 'points_desc') return b.netScore - a.netScore || a.classRank - b.classRank;
-      if (sortBy === 'points_asc') return a.netScore - b.netScore || a.classRank - b.classRank;
-      if (sortBy === 'plus_desc') return b.plus - a.plus || a.classRank - b.classRank;
-      if (sortBy === 'minus_desc') return b.minus - a.minus || a.classRank - b.classRank;
-      if (sortBy === 'progress') return (b.rankDelta ?? -99) - (a.rankDelta ?? -99);
-      if (sortBy === 'group') return a.student.group - b.student.group || a.classRank - b.classRank;
+      if (effectiveSortBy === 'rank') return a.classRank - b.classRank;
+      if (effectiveSortBy === 'rank_desc') return b.classRank - a.classRank;
+      if (effectiveSortBy === 'name' || effectiveSortBy === 'stt') return compareStudentsByUnifiedABC(a.student, b.student);
+      if (effectiveSortBy === 'name_desc') return compareStudentsByUnifiedABC(b.student, a.student);
+      if (effectiveSortBy === 'group') return a.student.group - b.student.group || compareStudentsByUnifiedABC(a.student, b.student);
+      if (effectiveSortBy === 'points_desc') return b.netScore - a.netScore || a.classRank - b.classRank;
+      if (effectiveSortBy === 'points_asc') return a.netScore - b.netScore || a.classRank - b.classRank;
+      if (effectiveSortBy === 'plus_desc') return b.plus - a.plus || a.classRank - b.classRank;
+      if (effectiveSortBy === 'minus_desc') return b.minus - a.minus || a.classRank - b.classRank;
+      if (effectiveSortBy === 'progress') return (b.rankDelta ?? -99) - (a.rankDelta ?? -99);
       return 0;
     });
 
     return list;
-  }, [monthlyStats, groupFilter, searchQuery, sortBy]);
+  }, [monthlyStats, groupFilter, searchQuery, effectiveSortBy, effectiveHideData, isPhhs, currentUser]);
 
   // Top 3 Podium
   const top1 = monthlyStats[0];
@@ -301,13 +330,19 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
 
   // Export to CSV
   const handleExportCSV = () => {
+    if (effectiveHideData) return;
+    const exportList = isPhhs
+      ? monthlyStats.filter((item) => isMyChild(item.student))
+      : monthlyStats;
     const weeksHeader = activeMonthInfo.weeks.map((w) => `Tuần ${w}`).join(',');
     const headers = `Hạng Tháng,Họ và tên,Tổ,Giới tính,Chức vụ,${weeksHeader},Điểm cộng (+),Điểm trừ (-),Tổng điểm Tháng,Hạng Tổ,Tiến bộ\n`;
 
-    const rows = monthlyStats
+    const rows = exportList
       .map((item) => {
         const stu = item.student;
-        const weekCols = item.weeklyBreakdown.map((w) => w.hasStarted ? w.net : '—').join(',');
+        const weekCols = item.weeklyBreakdown
+          .map((w) => (w.isHidden ? 'Bảo mật' : w.hasStarted ? w.net : '—'))
+          .join(',');
         const deltaStr =
           item.rankDelta !== undefined
             ? item.rankDelta > 0
@@ -351,9 +386,6 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
     }
   };
 
-  const isMonthHidden = Boolean(selectedClass?.hiddenMonths2_3_2?.includes(selectedMonth));
-  const effectiveHideData = (shouldHideScores || isMonthHidden) && !isTeacherOrAdmin;
-
   return (
     <div className="space-y-6">
       {/* Privacy Notice for Students/Guests/PHHS */}
@@ -377,12 +409,12 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
       {/* Management Control Banner for Admin & GVCN */}
       {isTeacherOrAdmin && (
         <div className={`rounded-2xl p-3.5 px-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-bold border transition shadow-xs ${
-          isMonthHidden 
+          isMonthHiddenBySetting 
             ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200' 
             : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
         }`}>
           <div className="flex items-center gap-2.5">
-            {isMonthHidden ? (
+            {isMonthHiddenBySetting ? (
               <span className="p-1.5 rounded-lg bg-amber-200 dark:bg-amber-900 text-amber-800 dark:text-amber-200">
                 <Lock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
               </span>
@@ -393,13 +425,13 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
             )}
             <div>
               <span className="block font-black text-xs">
-                {isMonthHidden
-                  ? `🔒 [QUẢN LÝ] Bảng Vàng Tháng ${selectedMonth} (36 HS) đang TẠM ẨN đối với Học sinh & Phụ huynh`
-                  : `👁️ [QUẢN LÝ] Bảng Vàng Tháng ${selectedMonth} (36 HS) đang CÔNG KHAI`}
+                {isMonthHiddenBySetting
+                  ? `🔒 [QUẢN LÝ] Bảng Vàng Tháng ${selectedMonth} (${students.length} HS) đang TẠM ẨN đối với Học sinh & Phụ huynh`
+                  : `👁️ [QUẢN LÝ] Bảng Vàng Tháng ${selectedMonth} (${students.length} HS) đang CÔNG KHAI`}
               </span>
               <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400">
-                {isMonthHidden
-                  ? 'Chỉ có tài khoản Admin & GVCN mới xem được bảng xếp hạng 36 học sinh tháng này.'
+                {isMonthHiddenBySetting
+                  ? 'Chỉ có tài khoản Admin & GVCN mới xem được bảng xếp hạng học sinh tháng này.'
                   : 'Học sinh và phụ huynh có thể theo dõi Bảng vàng thi đua tháng này bình thường.'}
               </span>
             </div>
@@ -408,13 +440,13 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
             onClick={handleToggleCurrentMonthHide}
             disabled={isUpdatingVisibility}
             className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 shrink-0 shadow-2xs ${
-              isMonthHidden
+              isMonthHiddenBySetting
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
                 : 'bg-amber-600 hover:bg-amber-700 text-white'
             }`}
           >
-            {isMonthHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>{isMonthHidden ? `Bỏ ẩn Tháng ${selectedMonth}` : `Ẩn Bảng Vàng Tháng ${selectedMonth}`}</span>
+            {isMonthHiddenBySetting ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            <span>{isMonthHiddenBySetting ? `Bỏ ẩn Tháng ${selectedMonth}` : `Ẩn Bảng Vàng Tháng ${selectedMonth}`}</span>
           </button>
         </div>
       )}
@@ -468,68 +500,95 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
               </select>
             </div>
 
-            <button
-              onClick={handleExportCSV}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 transition cursor-pointer"
-              title="Xuất bảng xếp hạng tháng ra file CSV"
-            >
-              <FileSpreadsheet className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <span className="hidden sm:inline">Xuất Excel / CSV</span>
-            </button>
+            {!effectiveHideData && (
+              <button
+                onClick={handleExportCSV}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 transition cursor-pointer"
+                title="Xuất bảng xếp hạng tháng ra file CSV"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <span className="hidden sm:inline">{isPhhs ? 'Xuất CSV của con' : 'Xuất Excel / CSV'}</span>
+              </button>
+            )}
 
-            <button
-              onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition cursor-pointer"
-              title="In bảng xếp hạng"
-            >
-              <Printer className="w-4 h-4 text-slate-600 dark:text-slate-400" />
-              <span>In</span>
-            </button>
+            {!effectiveHideData && !isPhhs && (
+              <button
+                onClick={() => window.print()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition cursor-pointer"
+                title="In bảng xếp hạng"
+              >
+                <Printer className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+                <span>In</span>
+              </button>
+            )}
           </div>
         </div>
 
         {/* 4 Monthly KPI Cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5 pt-5 border-t border-slate-100 dark:border-slate-800">
-          <div className="bg-amber-50/70 dark:bg-amber-950/40 p-3 rounded-2xl border border-amber-200/80 dark:border-amber-800/60">
-            <span className="text-[11px] font-bold text-amber-700 dark:text-amber-400 block">👑 Quán Quân {activeMonthInfo.shortLabel}</span>
-            <span className={`text-base font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-amber-950 dark:text-amber-200'} truncate mt-0.5 block`}>
-              {effectiveHideData ? 'Bảo mật' : (top1?.student.name || '—')}
-            </span>
-            <span className="text-[10px] text-amber-700 dark:text-amber-400 block font-semibold">
-              Tổ {top1?.student.group} • {effectiveHideData ? '???' : top1?.netScore}đ (+{effectiveHideData ? '???' : top1?.plus} thưởng)
-            </span>
+        {effectiveHideData ? (
+          <div className="mt-5 pt-5 border-t border-slate-100 dark:border-slate-800">
+            <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 p-4 flex items-center justify-center gap-2 text-xs font-bold text-slate-500 dark:text-slate-400">
+              <Lock className="w-4 h-4 text-amber-500 shrink-0" />
+              <span>Các chỉ số Quán quân, Điểm trung bình và Tiến bộ Tháng {selectedMonth} đang được bảo mật.</span>
+            </div>
           </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5 pt-5 border-t border-slate-100 dark:border-slate-800">
+            <div className="bg-amber-50/70 dark:bg-amber-950/40 p-3 rounded-2xl border border-amber-200/80 dark:border-amber-800/60">
+              <span className="text-[11px] font-bold text-amber-700 dark:text-amber-400 block">👑 Quán Quân {activeMonthInfo.shortLabel}</span>
+              <span className="text-base font-black text-amber-950 dark:text-amber-200 truncate mt-0.5 block">
+                {isPhhs && !isMyChild(top1?.student) ? MASK_STUDENT_NAME : (top1?.student.name || '—')}
+              </span>
+              <span className="text-[10px] text-amber-700 dark:text-amber-400 block font-semibold">
+                {isPhhs && !isMyChild(top1?.student)
+                  ? `Tổ ? • ${MASK_SCORE}`
+                  : `Tổ ${top1?.student.group} • ${top1?.netScore}đ (+${top1?.plus} thưởng)`}
+              </span>
+            </div>
 
-          <div className="bg-blue-50/70 dark:bg-blue-950/40 p-3 rounded-2xl border border-blue-200/80 dark:border-blue-800/60">
-            <span className="text-[11px] font-bold text-blue-700 dark:text-blue-400 block">📊 ĐTB Học Sinh Tháng</span>
-            <span className={`text-2xl font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-blue-900 dark:text-blue-200'} mt-0.5 block`}>
-              {effectiveHideData ? '???' : `${avgMonthScore}đ`}
-            </span>
-            <span className="text-[10px] text-blue-600 dark:text-blue-400 block font-medium">
-              Trung bình {students.length || 36} học sinh
-            </span>
-          </div>
+            <div className="bg-blue-50/70 dark:bg-blue-950/40 p-3 rounded-2xl border border-blue-200/80 dark:border-blue-800/60">
+              <span className="text-[11px] font-bold text-blue-700 dark:text-blue-400 block">📊 ĐTB Học Sinh Tháng</span>
+              <span className="text-2xl font-black text-blue-900 dark:text-blue-200 mt-0.5 block">
+                {isPhhs ? MASK_SCORE : `${avgMonthScore}đ`}
+              </span>
+              <span className="text-[10px] text-blue-600 dark:text-blue-400 block font-medium">
+                {isPhhs ? 'Bảo mật theo quy định PHHS' : `Trung bình ${students.length || 36} học sinh`}
+              </span>
+            </div>
 
-          <div className="bg-emerald-50/70 dark:bg-emerald-950/40 p-3 rounded-2xl border border-emerald-200/80 dark:border-emerald-800/60">
-            <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 block">🚀 Tiến Bộ Vượt Bậc</span>
-            <span className={`text-base font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-emerald-900 dark:text-emerald-200'} truncate mt-0.5 block`}>
-              {effectiveHideData ? 'Học sinh Bảo mật' : (mostImproved ? mostImproved.student.name : top1?.student.name)}
-            </span>
-            <span className="text-[10px] text-emerald-700 dark:text-emerald-400 block font-semibold">
-              {mostImproved?.rankDelta ? `▲ Tăng +${mostImproved.rankDelta} bậc thứ hạng` : 'Duy trì phong độ'}
-            </span>
-          </div>
+            <div className="bg-emerald-50/70 dark:bg-emerald-950/40 p-3 rounded-2xl border border-emerald-200/80 dark:border-emerald-800/60">
+              <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 block">🚀 Tiến Bộ Vượt Bậc</span>
+              {(() => {
+                const target = mostImproved || top1;
+                const hideTarget = isPhhs && !isMyChild(target?.student);
+                return (
+                  <>
+                    <span className="text-base font-black text-emerald-900 dark:text-emerald-200 truncate mt-0.5 block">
+                      {hideTarget ? MASK_STUDENT_NAME : (target?.student.name || '—')}
+                    </span>
+                    <span className="text-[10px] text-emerald-700 dark:text-emerald-400 block font-semibold">
+                      {hideTarget
+                        ? MASK_SCORE
+                        : mostImproved?.rankDelta
+                        ? `▲ Tăng +${mostImproved.rankDelta} bậc thứ hạng`
+                        : 'Duy trì phong độ'}
+                    </span>
+                  </>
+                );
+              })()}
+            </div>
 
-          <div className="bg-indigo-50/70 dark:bg-indigo-950/40 p-3 rounded-2xl border border-indigo-200/80 dark:border-indigo-800/60">
-            <span className="text-[11px] font-bold text-indigo-700 dark:text-indigo-400 block">🌸 Kiện Tướng Hoa Điểm 10</span>
-            <span className={`text-base font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-indigo-900 dark:text-indigo-200'} truncate mt-0.5 block`}>
-              {effectiveHideData ? 'Học sinh Bảo mật' : (topPlusStudent?.student.name || '—')}
-            </span>
-            <span className={`text-[10px] ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-indigo-700 dark:text-indigo-400'} block font-semibold`}>
-              {effectiveHideData ? '???' : `+${topPlusStudent?.plus}`} điểm thưởng trong tháng
-            </span>
+            <div className="bg-indigo-50/70 dark:bg-indigo-950/40 p-3 rounded-2xl border border-indigo-200/80 dark:border-indigo-800/60">
+              <span className="text-[11px] font-bold text-indigo-700 dark:text-indigo-400 block">🌸 Kiện Tướng Hoa Điểm 10</span>
+              <span className="text-base font-black text-indigo-900 dark:text-indigo-200 truncate mt-0.5 block">
+                {isPhhs && !isMyChild(topPlusStudent?.student) ? MASK_STUDENT_NAME : (topPlusStudent?.student.name || '—')}
+              </span>
+              <span className="text-[10px] text-indigo-700 dark:text-indigo-400 block font-semibold">
+                {isPhhs && !isMyChild(topPlusStudent?.student) ? MASK_SCORE : `+${topPlusStudent?.plus} điểm thưởng trong tháng`}
+              </span>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* TOP 3 PODIUM HONORS (BỤC VINH DANH THÁNG) */}
@@ -548,108 +607,124 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
           </h3>
         </div>
 
-        {/* Podium Layout */}
-        <div className="grid grid-cols-3 gap-2 sm:gap-4 max-w-2xl mx-auto items-end pt-2 pb-1">
-          {/* Top 2: Silver */}
-          {top2 && (() => {
-            const isChild = isMyChild(top2.student);
-            const hideScore = effectiveHideData || (isPhhs && !isChild);
-            return (
-              <div
-                onClick={() => !hideScore ? onOpenStudentDetail(top2.student.id) : null}
-                className={`bg-white/10 ${!hideScore ? 'hover:bg-white/15 cursor-pointer transform hover:-translate-y-1' : 'cursor-not-allowed opacity-90'} backdrop-blur-md rounded-2xl sm:rounded-3xl p-3 sm:p-4 text-center border border-white/15 transition shadow-md flex flex-col items-center ${isChild ? 'ring-2 ring-amber-400 shadow-amber-500/30' : ''}`}
-              >
-                <div className="relative mb-2">
-                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-gradient-to-tr from-slate-400 to-slate-200 text-slate-900 font-black text-base sm:text-lg flex items-center justify-center shadow-lg">
-                    {effectiveHideData ? '??' : top2.student.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+        {effectiveHideData ? (
+          <div className="relative z-10 max-w-xl mx-auto rounded-2xl bg-white/10 border border-white/15 p-6 text-center backdrop-blur-md">
+            <Lock className="w-8 h-8 text-amber-300 mx-auto mb-2" />
+            <p className="font-black text-sm text-white">Bục Vinh Danh Top 3 {activeMonthInfo.label} Đang Tạm Ẩn</p>
+            <p className="text-xs text-blue-100/80 mt-1">
+              Danh sách Quán quân và Á quân tháng sẽ được công bố khi GVCN mở công khai.
+            </p>
+          </div>
+        ) : (
+          /* Podium Layout */
+          <div className="grid grid-cols-3 gap-2 sm:gap-4 max-w-2xl mx-auto items-end pt-2 pb-1">
+            {/* Top 2: Silver */}
+            {top2 && (() => {
+              const isChild = isMyChild(top2.student);
+              const hideScore = isPhhs && !isChild;
+              return (
+                <div
+                  onClick={() => (!hideScore ? onOpenStudentDetail(top2.student.id) : null)}
+                  className={`bg-white/10 ${!hideScore ? 'hover:bg-white/15 cursor-pointer transform hover:-translate-y-1' : 'cursor-not-allowed opacity-90'} backdrop-blur-md rounded-2xl sm:rounded-3xl p-3 sm:p-4 text-center border border-white/15 transition shadow-md flex flex-col items-center ${isChild ? 'ring-2 ring-amber-400 shadow-amber-500/30' : ''}`}
+                >
+                  <div className="relative mb-2">
+                    <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-gradient-to-tr from-slate-400 to-slate-200 text-slate-900 font-black text-base sm:text-lg flex items-center justify-center shadow-lg">
+                      {hideScore ? 'BM' : top2.student.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+                    </div>
+                    <span className="absolute -bottom-1.5 -right-1.5 w-6 h-6 rounded-full bg-slate-300 text-slate-900 font-black text-xs flex items-center justify-center shadow-sm">
+                      🥈
+                    </span>
                   </div>
-                  <span className="absolute -bottom-1.5 -right-1.5 w-6 h-6 rounded-full bg-slate-300 text-slate-900 font-black text-xs flex items-center justify-center shadow-sm">
-                    {effectiveHideData ? '?' : '🥈'}
+                  <span className="text-[11px] sm:text-xs font-bold text-slate-300 block">Á Quân 1</span>
+                  <span className="text-xs sm:text-sm font-black text-white truncate max-w-full block mt-0.5">
+                    {hideScore ? MASK_STUDENT_NAME : top2.student.name}
                   </span>
+                  {isChild && (
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-400 text-amber-950 mt-0.5">Con của bạn</span>
+                  )}
+                  <span className="text-[10px] text-blue-200 block font-medium">
+                    {hideScore ? 'Tổ ?' : `Tổ ${top2.student.group}`}
+                  </span>
+                  <div className="mt-2 px-2 py-0.5 rounded-lg bg-white/20 text-white font-black text-xs sm:text-sm">
+                    {hideScore ? '*** (Bảo mật)' : `${top2.netScore}đ`}
+                  </div>
                 </div>
-                <span className={`text-[11px] sm:text-xs font-bold ${effectiveHideData ? 'text-slate-400 blur-xs' : 'text-slate-300'} block`}>Á Quân 1</span>
-                <span className={`text-xs sm:text-sm font-black text-white truncate max-w-full block mt-0.5 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                  {effectiveHideData ? '???' : top2.student.name}
-                </span>
-                {isChild && (
-                  <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-400 text-amber-950 mt-0.5">Con của bạn</span>
-                )}
-                <span className="text-[10px] text-blue-200 block font-medium">Tổ {top2.student.group}</span>
-                <div className="mt-2 px-2 py-0.5 rounded-lg bg-white/20 text-white font-black text-xs sm:text-sm">
-                  {hideScore ? '*** (Bảo mật)' : `${top2.netScore}đ`}
-                </div>
-              </div>
-            );
-          })()}
+              );
+            })()}
 
-          {/* Top 1: Gold (Center & Taller) */}
-          {top1 && (() => {
-            const isChild = isMyChild(top1.student);
-            const hideScore = effectiveHideData || (isPhhs && !isChild);
-            return (
-              <div
-                onClick={() => !hideScore ? onOpenStudentDetail(top1.student.id) : null}
-                className={`bg-gradient-to-b from-amber-500/30 to-amber-600/20 ${!hideScore ? 'hover:from-amber-500/40 hover:to-amber-600/30 cursor-pointer transform hover:-translate-y-1.5' : 'cursor-not-allowed opacity-90'} backdrop-blur-md rounded-2xl sm:rounded-3xl p-3 sm:p-5 text-center border-2 border-amber-400/60 transition shadow-xl flex flex-col items-center relative -mt-3 ${isChild ? 'ring-4 ring-amber-300 shadow-amber-500/50' : ''}`}
-              >
-                <div className="absolute -top-3.5 px-2.5 py-0.5 rounded-full bg-amber-400 text-amber-950 font-black text-[10px] shadow-sm flex items-center gap-1">
-                  <span>👑</span>
-                  <span>QUÁN QUÂN</span>
-                </div>
-                <div className="relative mb-2 mt-1">
-                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-gradient-to-tr from-amber-400 to-yellow-300 text-amber-950 font-black text-lg sm:text-xl flex items-center justify-center shadow-xl shadow-amber-500/30">
-                    {effectiveHideData ? '??' : top1.student.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+            {/* Top 1: Gold (Center & Taller) */}
+            {top1 && (() => {
+              const isChild = isMyChild(top1.student);
+              const hideScore = isPhhs && !isChild;
+              return (
+                <div
+                  onClick={() => (!hideScore ? onOpenStudentDetail(top1.student.id) : null)}
+                  className={`bg-gradient-to-b from-amber-500/30 to-amber-600/20 ${!hideScore ? 'hover:from-amber-500/40 hover:to-amber-600/30 cursor-pointer transform hover:-translate-y-1.5' : 'cursor-not-allowed opacity-90'} backdrop-blur-md rounded-2xl sm:rounded-3xl p-3 sm:p-5 text-center border-2 border-amber-400/60 transition shadow-xl flex flex-col items-center relative -mt-3 ${isChild ? 'ring-4 ring-amber-300 shadow-amber-500/50' : ''}`}
+                >
+                  <div className="absolute -top-3.5 px-2.5 py-0.5 rounded-full bg-amber-400 text-amber-950 font-black text-[10px] shadow-sm flex items-center gap-1">
+                    <span>👑</span>
+                    <span>QUÁN QUÂN</span>
                   </div>
-                  <span className="absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-full bg-amber-400 text-amber-950 font-black text-sm flex items-center justify-center shadow-md">
-                    {effectiveHideData ? '?' : '🥇'}
+                  <div className="relative mb-2 mt-1">
+                    <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-gradient-to-tr from-amber-400 to-yellow-300 text-amber-950 font-black text-lg sm:text-xl flex items-center justify-center shadow-xl shadow-amber-500/30">
+                      {hideScore ? 'BM' : top1.student.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+                    </div>
+                    <span className="absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-full bg-amber-400 text-amber-950 font-black text-sm flex items-center justify-center shadow-md">
+                      🥇
+                    </span>
+                  </div>
+                  <span className="text-xs font-extrabold text-amber-300 block">Hạng 1 Toàn Lớp</span>
+                  <span className="text-sm sm:text-base font-black text-white truncate max-w-full block mt-0.5">
+                    {hideScore ? MASK_STUDENT_NAME : top1.student.name}
                   </span>
+                  {isChild && (
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-400 text-amber-950 mt-0.5">Con của bạn</span>
+                  )}
+                  <span className="text-[11px] text-amber-200 block font-medium">
+                    {hideScore ? 'Tổ ?' : `Tổ ${top1.student.group}${top1.student.roleInGroup ? ` • ${top1.student.roleInGroup}` : ''}`}
+                  </span>
+                  <div className="mt-2.5 px-3 py-1 rounded-xl bg-amber-400 text-amber-950 font-black text-sm sm:text-base shadow-sm">
+                    {hideScore ? '*** (Bảo mật)' : `${top1.netScore}đ`}
+                  </div>
                 </div>
-                <span className={`text-xs font-extrabold ${effectiveHideData ? 'text-amber-500/50 blur-xs' : 'text-amber-300'} block`}>Hạng 1 Toàn Lớp</span>
-                <span className={`text-sm sm:text-base font-black text-white truncate max-w-full block mt-0.5 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                  {effectiveHideData ? '???' : top1.student.name}
-                </span>
-                {isChild && (
-                  <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-400 text-amber-950 mt-0.5">Con của bạn</span>
-                )}
-                <span className="text-[11px] text-amber-200 block font-medium">Tổ {top1.student.group} {top1.student.roleInGroup ? `• ${top1.student.roleInGroup}` : ''}</span>
-                <div className="mt-2.5 px-3 py-1 rounded-xl bg-amber-400 text-amber-950 font-black text-sm sm:text-base shadow-sm">
-                  {hideScore ? '*** (Bảo mật)' : `${top1.netScore}đ`}
-                </div>
-              </div>
-            );
-          })()}
+              );
+            })()}
 
-          {/* Top 3: Bronze */}
-          {top3 && (() => {
-            const isChild = isMyChild(top3.student);
-            const hideScore = effectiveHideData || (isPhhs && !isChild);
-            return (
-              <div
-                onClick={() => !hideScore ? onOpenStudentDetail(top3.student.id) : null}
-                className={`bg-white/10 ${!hideScore ? 'hover:bg-white/15 cursor-pointer transform hover:-translate-y-1' : 'cursor-not-allowed opacity-90'} backdrop-blur-md rounded-2xl sm:rounded-3xl p-3 sm:p-4 text-center border border-white/15 transition shadow-md flex flex-col items-center ${isChild ? 'ring-2 ring-amber-400 shadow-amber-500/30' : ''}`}
-              >
-                <div className="relative mb-2">
-                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-gradient-to-tr from-amber-700 to-amber-600 text-white font-black text-base sm:text-lg flex items-center justify-center shadow-lg">
-                    {effectiveHideData ? '??' : top3.student.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+            {/* Top 3: Bronze */}
+            {top3 && (() => {
+              const isChild = isMyChild(top3.student);
+              const hideScore = isPhhs && !isChild;
+              return (
+                <div
+                  onClick={() => (!hideScore ? onOpenStudentDetail(top3.student.id) : null)}
+                  className={`bg-white/10 ${!hideScore ? 'hover:bg-white/15 cursor-pointer transform hover:-translate-y-1' : 'cursor-not-allowed opacity-90'} backdrop-blur-md rounded-2xl sm:rounded-3xl p-3 sm:p-4 text-center border border-white/15 transition shadow-md flex flex-col items-center ${isChild ? 'ring-2 ring-amber-400 shadow-amber-500/30' : ''}`}
+                >
+                  <div className="relative mb-2">
+                    <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-gradient-to-tr from-amber-700 to-amber-600 text-white font-black text-base sm:text-lg flex items-center justify-center shadow-lg">
+                      {hideScore ? 'BM' : top3.student.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+                    </div>
+                    <span className="absolute -bottom-1.5 -right-1.5 w-6 h-6 rounded-full bg-amber-700 text-white font-black text-xs flex items-center justify-center shadow-sm">
+                      🥉
+                    </span>
                   </div>
-                  <span className="absolute -bottom-1.5 -right-1.5 w-6 h-6 rounded-full bg-amber-700 text-white font-black text-xs flex items-center justify-center shadow-sm">
-                    {effectiveHideData ? '?' : '🥉'}
+                  <span className="text-[11px] sm:text-xs font-bold text-amber-300 block">Á Quân 2</span>
+                  <span className="text-xs sm:text-sm font-black text-white truncate max-w-full block mt-0.5">
+                    {hideScore ? MASK_STUDENT_NAME : top3.student.name}
                   </span>
+                  {isChild && (
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-400 text-amber-950 mt-0.5">Con của bạn</span>
+                  )}
+                  <span className="text-[10px] text-blue-200 block font-medium">
+                    {hideScore ? 'Tổ ?' : `Tổ ${top3.student.group}`}
+                  </span>
+                  <div className="mt-2 px-2 py-0.5 rounded-lg bg-white/20 text-white font-black text-xs sm:text-sm">
+                    {hideScore ? '*** (Bảo mật)' : `${top3.netScore}đ`}
+                  </div>
                 </div>
-                <span className={`text-[11px] sm:text-xs font-bold ${effectiveHideData ? 'text-amber-500/50 blur-xs' : 'text-amber-300'} block`}>Á Quân 2</span>
-                <span className={`text-xs sm:text-sm font-black text-white truncate max-w-full block mt-0.5 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                  {effectiveHideData ? '???' : top3.student.name}
-                </span>
-                {isChild && (
-                  <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-400 text-amber-950 mt-0.5">Con của bạn</span>
-                )}
-                <span className="text-[10px] text-blue-200 block font-medium">Tổ {top3.student.group}</span>
-                <div className="mt-2 px-2 py-0.5 rounded-lg bg-white/20 text-white font-black text-xs sm:text-sm">
-                  {hideScore ? '*** (Bảo mật)' : `${top3.netScore}đ`}
-                </div>
-              </div>
-            );
-          })()}
-        </div>
+              );
+            })()}
+          </div>
+        )}
       </div>
 
       {/* FILTER & FULL RANKING TABLE FOR 36 STUDENTS IN THE MONTH */}
@@ -700,16 +775,20 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
             </div>
 
             <select
-              value={sortBy}
+              value={effectiveSortBy}
               onChange={(e) => setSortBy(e.target.value)}
               className="rounded-xl border border-slate-200 dark:border-slate-700 py-1.5 px-3 text-xs font-semibold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 outline-none cursor-pointer"
             >
-              <option value="rank">🏆 Hạng Tháng (Top 1 → {students.length})</option>
-              <option value="points_desc">Điểm Tháng Giảm Dần (Cao → Thấp)</option>
-              <option value="points_asc">Điểm Tháng Tăng Dần (Thấp → Cao)</option>
-              <option value="progress">🚀 Tiến bộ thứ hạng nhiều nhất</option>
-              <option value="plus_desc">Điểm Thưởng (+) Nhiều Nhất</option>
-              <option value="minus_desc">Điểm Trừ (-) Nhiều Nhất</option>
+              {!effectiveHideData && !isPhhs && (
+                <>
+                  <option value="rank">🏆 Hạng Tháng (Top 1 → {students.length})</option>
+                  <option value="points_desc">Điểm Tháng Giảm Dần (Cao → Thấp)</option>
+                  <option value="points_asc">Điểm Tháng Tăng Dần (Thấp → Cao)</option>
+                  <option value="progress">🚀 Tiến bộ thứ hạng nhiều nhất</option>
+                  <option value="plus_desc">Điểm Thưởng (+) Nhiều Nhất</option>
+                  <option value="minus_desc">Điểm Trừ (-) Nhiều Nhất</option>
+                </>
+              )}
               <option value="name">Tên học sinh ABC (STT 1 → {students.length})</option>
               <option value="group">Theo Tổ (Tổ 1 → 4, trong tổ xếp ABC)</option>
             </select>
@@ -770,8 +849,8 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
                   >
                     {/* Hạng Tháng */}
                     <td className="py-3 px-3 text-center">
-                      {effectiveHideData ? (
-                        <span className="font-bold text-slate-300">?</span>
+                      {effectiveRowHide ? (
+                        <span className="font-bold text-slate-400">{MASK_RANK}</span>
                       ) : isTop1 ? (
                         <span className="w-6 h-6 mx-auto rounded-full bg-amber-400 text-amber-950 font-black text-xs flex items-center justify-center shadow-xs">
                           1
@@ -797,27 +876,31 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
                         <div className={`w-7 h-7 rounded-lg text-xs font-black flex items-center justify-center shrink-0 ${
                           isChild 
                             ? 'bg-amber-500 text-white shadow-xs' 
+                            : effectiveRowHide
+                            ? 'bg-slate-100 dark:bg-slate-800 text-slate-400'
                             : 'bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300'
                         }`}>
-                          {effectiveHideData ? '??' : stu.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+                          {effectiveRowHide ? 'BM' : stu.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
                         </div>
                         <div>
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className={`font-bold ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-slate-900 dark:text-slate-100'} group-hover:text-amber-600 dark:group-hover:text-amber-400 transition`}>
-                              {effectiveHideData ? `Học sinh ${item.classRank}` : stu.name}
+                            <span className={`font-bold ${effectiveRowHide ? 'text-slate-400' : 'text-slate-900 dark:text-slate-100 group-hover:text-amber-600 dark:group-hover:text-amber-400'} transition`}>
+                              {effectiveRowHide ? MASK_STUDENT_NAME : stu.name}
                             </span>
                             {isChild && (
                               <span className="px-1.5 py-0.5 rounded text-[10px] font-black bg-amber-500 text-white shrink-0 shadow-2xs">
                                 Con của bạn
                               </span>
                             )}
-                            <span className="text-[9px] font-bold text-slate-400 bg-slate-100 dark:bg-slate-800 px-1 rounded" title={`STT toàn lớp: #${getStudentCanonicalSTT(stu)}`}>
-                              #{getStudentCanonicalSTT(stu)}
-                            </span>
+                            {!effectiveRowHide && (
+                              <span className="text-[9px] font-bold text-slate-400 bg-slate-100 dark:bg-slate-800 px-1 rounded" title={`STT toàn lớp: #${getStudentCanonicalSTT(stu)}`}>
+                                #{getStudentCanonicalSTT(stu)}
+                              </span>
+                            )}
                           </div>
-                          {stu.roleInGroup && (
+                          {!effectiveRowHide && stu.roleInGroup && (
                             <span className="text-[10px] text-amber-800 dark:text-amber-400 font-semibold block">
-                              {effectiveHideData ? 'Cán sự' : stu.roleInGroup}
+                              {stu.roleInGroup}
                             </span>
                           )}
                         </div>
@@ -834,55 +917,51 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
                     {/* Điểm từng tuần trong tháng */}
                     {item.weeklyBreakdown.map((wb) => (
                       <td key={wb.week} className="py-3 px-2 text-center">
-                        {!wb.hasStarted ? (
+                        {wb.isHidden || effectiveRowHide ? (
+                          <span className="text-slate-400 font-bold text-[10px]">{MASK_SCORE}</span>
+                        ) : !wb.hasStarted ? (
                           <span className="text-slate-300 dark:text-slate-600 text-[11px]">—</span>
-                        ) : hideForOtherPhhs ? (
-                          <span className="text-slate-400 font-bold text-[10px]">***</span>
                         ) : wb.baseScore === 0 ? (
                           <span
                             className={`inline-block px-1.5 py-0.5 rounded-md font-bold text-[11px] ${
-                              effectiveHideData ? 'text-slate-300 blur-xs' : (wb.net > 0
+                              wb.net > 0
                                 ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/80 dark:border-emerald-800'
                                 : wb.net < 0
                                 ? 'text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/60 border border-rose-200/80 dark:border-rose-800'
-                                : 'text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700')
+                                : 'text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700'
                             }`}
                           >
-                            {effectiveHideData ? '???' : (wb.net > 0 ? `+${wb.net}` : wb.net)}
+                            {wb.net > 0 ? `+${wb.net}` : wb.net}
                           </span>
                         ) : (
-                        <span
-                          className={`inline-block px-1.5 py-0.5 rounded-md font-bold text-[11px] ${
-                            effectiveHideData ? 'text-slate-300 blur-xs' : (wb.net > wb.baseScore
-                              ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/80 dark:border-emerald-800'
-                              : wb.net < wb.baseScore
-                              ? 'text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/60 border border-rose-200/80 dark:border-rose-800'
-                              : 'text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700')
-                          }`}
-                        >
-                          {effectiveHideData ? '???' : wb.net}
-                        </span>
+                          <span
+                            className={`inline-block px-1.5 py-0.5 rounded-md font-bold text-[11px] ${
+                              wb.net > wb.baseScore
+                                ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/80 dark:border-emerald-800'
+                                : wb.net < wb.baseScore
+                                ? 'text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/60 border border-rose-200/80 dark:border-rose-800'
+                                : 'text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700'
+                            }`}
+                          >
+                            {wb.net}
+                          </span>
                         )}
                       </td>
                     ))}
 
                     {/* Thưởng (+) */}
-                    <td className={`py-3 px-3 text-center font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50/20 dark:bg-emerald-950/10 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                      {hideForOtherPhhs ? (
-                        <span className="text-slate-400 font-bold text-xs">***</span>
-                      ) : effectiveHideData ? (
-                        '???'
+                    <td className="py-3 px-3 text-center font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50/20 dark:bg-emerald-950/10">
+                      {effectiveRowHide ? (
+                        <span className="text-slate-400 font-bold text-xs">{MASK_SCORE}</span>
                       ) : (
                         item.plus > 0 ? `+${item.plus}` : '0'
                       )}
                     </td>
 
                     {/* Trừ (-) */}
-                    <td className={`py-3 px-3 text-center font-bold text-rose-600 dark:text-rose-400 bg-rose-50/20 dark:bg-rose-950/10 ${effectiveHideData ? 'blur-xs' : ''}`}>
-                      {hideForOtherPhhs ? (
-                        <span className="text-slate-400 font-bold text-xs">***</span>
-                      ) : effectiveHideData ? (
-                        '???'
+                    <td className="py-3 px-3 text-center font-bold text-rose-600 dark:text-rose-400 bg-rose-50/20 dark:bg-rose-950/10">
+                      {effectiveRowHide ? (
+                        <span className="text-slate-400 font-bold text-xs">{MASK_SCORE}</span>
                       ) : (
                         item.minus > 0 ? `-${item.minus}` : '0'
                       )}
@@ -890,12 +969,10 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
 
                     {/* Tổng Điểm Tháng */}
                     <td className="py-3 px-3 text-center bg-amber-50/30 dark:bg-amber-950/20">
-                      {hideForOtherPhhs ? (
+                      {effectiveRowHide ? (
                         <span className="inline-block px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs">
                           *** (Bảo mật)
                         </span>
-                      ) : effectiveHideData ? (
-                        <span className="text-slate-300 blur-xs font-black text-xs">???</span>
                       ) : (item.targetBaseScore === 0 ? (
                         <span
                           className={`inline-block px-2.5 py-1 rounded-xl font-black text-xs ${
@@ -926,8 +1003,8 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
                     {/* Hạng Trong Tổ */}
                     <td className="py-3 px-3 text-center">
                       <span className="font-semibold text-slate-700 dark:text-slate-300">
-                        {effectiveHideData ? (
-                          <span className="text-slate-300">?</span>
+                        {effectiveRowHide ? (
+                          <span className="text-slate-400">{MASK_RANK}</span>
                         ) : item.groupRank === 1 ? (
                           <span className="text-amber-600 dark:text-amber-400 font-black">🥇 #1</span>
                         ) : (
@@ -939,7 +1016,7 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
                     {/* Tiến Bộ / Biến Động */}
                     <td className="py-3 px-3 text-center">
                       {effectiveRowHide ? (
-                        <span className="text-slate-300 dark:text-slate-600 blur-xs text-[11px]">???</span>
+                        <span className="text-slate-400 text-[11px]">{MASK_SCORE}</span>
                       ) : item.rankDelta !== undefined ? (
                         item.rankDelta > 0 ? (
                           <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 font-bold text-[11px]">
@@ -961,12 +1038,19 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
 
                     {/* Danh hiệu tháng */}
                     <td className="py-3 px-3 text-center">
-                      <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${item.badge.color}`}
-                      >
-                        <span>{item.badge.icon}</span>
-                        <span>{item.badge.title}</span>
-                      </span>
+                      {effectiveRowHide ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-200 dark:border-slate-700">
+                          <Lock className="w-3 h-3" />
+                          <span>Bảo mật</span>
+                        </span>
+                      ) : (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${item.badge.color}`}
+                        >
+                          <span>{item.badge.icon}</span>
+                          <span>{item.badge.title}</span>
+                        </span>
+                      )}
                     </td>
 
                     {/* Hành Động */}
@@ -982,7 +1066,7 @@ export const MonthlyStudentRankingSection: React.FC<MonthlyStudentRankingSection
                             ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-200 dark:border-slate-700 cursor-not-allowed opacity-60'
                             : 'bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 hover:bg-amber-500 hover:text-white border-amber-200 dark:border-amber-800'
                         }`}
-                        title={effectiveRowHide ? 'Bảo mật: Phụ huynh chỉ xem chi tiết của con' : 'Xem hồ sơ chi tiết'}
+                        title={effectiveRowHide ? 'Bảo mật: Dữ liệu đang được ẩn' : 'Xem hồ sơ chi tiết'}
                       >
                         {effectiveRowHide ? <Lock className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                         <span>{effectiveRowHide ? 'Bảo mật' : 'Xem chi tiết'}</span>

@@ -56,6 +56,14 @@ import { MonthlyStudentRankingSection } from './MonthlyStudentRankingSection.tsx
 import { StudentMonthlyProgressCard } from './StudentMonthlyProgressCard.tsx';
 import { compareStudentsByUnifiedABC, sortStudentsByABC } from '../utils/vietnameseSorting.ts';
 import { useAuth } from '../context/AuthContext.tsx';
+import {
+  MASK_SCORE,
+  MASK_RANK,
+  MASK_STUDENT_NAME,
+  isGlobalRankingHidden,
+  getHiddenWeeksSet,
+  isMyChildStudent,
+} from '../utils/privacyMasking.ts';
 
 interface StudentWeeklyProgressViewProps {
   currentWeek: number;
@@ -85,15 +93,10 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
   systemConfig,
 }) => {
   const { isDark } = useTheme();
-  const { currentUser, isTeacherOrAdmin, canManageGroup } = useAuth();
+  const { currentUser, isTeacherOrAdmin } = useAuth();
   const isPhhs = currentUser?.role === 'phhs';
 
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (currentUser.studentName && stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()) return true;
-    return false;
-  };
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
 
   const myChild = useMemo(() => {
     if (!isPhhs || !currentUser) return null;
@@ -103,32 +106,33 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
   const className = selectedClass?.name || (students[0]?.classId ? `Lớp ${students[0].classId}` : 'Lớp 8A1');
   const classIdLabel = selectedClass?.id || students[0]?.classId || '8A1';
 
-  const isStudentScoreHidden = (stu?: Student | null) => {
-    if (!systemConfig?.hideRankingScores) return false;
-    if (isTeacherOrAdmin) return false;
-    if (stu && canManageGroup(stu.group)) return false;
-    return true;
-  };
-
-  const shouldHideScores = Boolean(systemConfig?.hideRankingScores && !isTeacherOrAdmin);
-  const isHiddenWeek = (w: number) => Boolean(selectedClass?.hiddenWeeks2_1?.includes(w));
+  const shouldHideScores = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = useMemo(
+    () => getHiddenWeeksSet(selectedClass, isTeacherOrAdmin),
+    [selectedClass, isTeacherOrAdmin]
+  );
 
   // Mode: 'matrix' (Default) | 'monthly_leaderboard' | 'detail' | 'comparison'
   const [viewMode, setViewMode] = useState<'matrix' | 'monthly_leaderboard' | 'detail' | 'comparison'>(() => {
-    if (initialViewMode) return initialViewMode;
+    if (initialViewMode) {
+      if ((isPhhs || shouldHideScores) && initialViewMode === 'comparison') {
+        return isPhhs ? 'detail' : 'matrix';
+      }
+      return initialViewMode;
+    }
     return initialSelectedStudentId ? 'detail' : 'matrix';
   });
 
   // Sync with initialViewMode when user clicks from Navbar sub-options
   React.useEffect(() => {
     if (initialViewMode) {
-      if (isPhhs && initialViewMode === 'comparison') {
-        setViewMode('detail');
+      if ((isPhhs || shouldHideScores) && initialViewMode === 'comparison') {
+        setViewMode(isPhhs ? 'detail' : 'matrix');
       } else {
         setViewMode(initialViewMode);
       }
     }
-  }, [initialViewMode, isPhhs]);
+  }, [initialViewMode, isPhhs, shouldHideScores]);
 
   // Selected student ID for detail view
   const [selectedStudentId, setSelectedStudentId] = useState<string>(() => {
@@ -206,7 +210,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     > = {};
 
     for (let w = 1; w <= 35; w++) {
-      const wRecords = records.filter((r) => r.week === w);
+      const isWeekHidden = hiddenWeeksSet.has(w);
+      const wRecords = isWeekHidden ? [] : records.filter((r) => r.week === w);
       const studentScores: Record<
         string,
         { plus: number; minus: number; net: number; recordsCount: number; isWarning: boolean }
@@ -283,13 +288,13 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     }
 
     return weekMap;
-  }, [records, students]);
+  }, [records, students, hiddenWeeksSet, selectedClass?.baseScore]);
 
   // Overall Cumulative Leaderboard for all students (to get all-time overall ranks)
   const cumulativeLeaderboard = useMemo(() => {
     const list = students.map((stu) => {
       const stuRecords = records.filter(
-        (r) => r.studentId === stu.id || r.studentName === stu.name
+        (r) => !hiddenWeeksSet.has(r.week) && (r.studentId === stu.id || r.studentName === stu.name)
       );
       const totalPlus = stuRecords.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
       const totalMinus = stuRecords.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
@@ -313,36 +318,57 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
       ...item,
       classRank: list.findIndex((s) => s.netScore === item.netScore && s.totalPlus === item.totalPlus) + 1,
     }));
-  }, [students, records]);
+  }, [students, records, hiddenWeeksSet, selectedClass?.baseScore]);
+
+  const isRestrictedSort = shouldHideScores || isPhhs;
+
+  // Effective sort preventing rank/score leakage when hidden or PHHS
+  const effectiveMatrixSortBy = useMemo(() => {
+    if (isRestrictedSort) {
+      if (matrixSortBy === 'group' || matrixSortBy === 'group_desc' || matrixSortBy === 'name_desc') {
+        return matrixSortBy;
+      }
+      return 'name';
+    }
+    if (matrixSortBy.startsWith('week_')) {
+      const weekNum = parseInt(matrixSortBy.split('_')[1], 10);
+      if (hiddenWeeksSet.has(weekNum)) return 'name';
+    }
+    return matrixSortBy;
+  }, [isRestrictedSort, matrixSortBy, hiddenWeeksSet]);
 
   // Filtered and Sorted Matrix Data for Table View
   const matrixStudentsData = useMemo(() => {
     let list = cumulativeLeaderboard.filter((item) => {
       const matchGroup = matrixGroupFilter === 'all' || item.student?.group === matrixGroupFilter;
-      const matchSearch =
-        !matrixSearch.trim() ||
-        (item.student?.name || '').toLowerCase().includes(matrixSearch.toLowerCase());
-      return matchGroup && matchSearch;
+      if (matrixSearch.trim()) {
+        if (shouldHideScores || (isPhhs && !isMyChild(item.student))) {
+          return false;
+        }
+        const matchSearch = (item.student?.name || '').toLowerCase().includes(matrixSearch.toLowerCase());
+        return matchGroup && matchSearch;
+      }
+      return matchGroup;
     });
 
     // Sorting
     list.sort((a, b) => {
-      if (matrixSortBy === 'rank') return a.classRank - b.classRank;
-      if (matrixSortBy === 'rank_desc') return b.classRank - a.classRank;
-      if (matrixSortBy === 'name' || matrixSortBy === 'stt') return compareStudentsByUnifiedABC(a.student, b.student);
-      if (matrixSortBy === 'name_desc') return compareStudentsByUnifiedABC(b.student, a.student);
-      if (matrixSortBy === 'points_desc') return b.netScore - a.netScore || a.classRank - b.classRank;
-      if (matrixSortBy === 'points_asc') return a.netScore - b.netScore || a.classRank - b.classRank;
-      if (matrixSortBy === 'plus_desc') return b.totalPlus - a.totalPlus || b.netScore - a.netScore;
-      if (matrixSortBy === 'plus_asc') return a.totalPlus - b.totalPlus || a.netScore - b.netScore;
-      if (matrixSortBy === 'minus_desc') return b.totalMinus - a.totalMinus || a.netScore - b.netScore;
-      if (matrixSortBy === 'minus_asc') return a.totalMinus - b.totalMinus || a.netScore - b.netScore;
-      if (matrixSortBy === 'group') return a.student.group - b.student.group || compareStudentsByUnifiedABC(a.student, b.student);
-      if (matrixSortBy === 'group_desc') return b.student.group - a.student.group || compareStudentsByUnifiedABC(a.student, b.student);
+      if (effectiveMatrixSortBy === 'rank') return a.classRank - b.classRank;
+      if (effectiveMatrixSortBy === 'rank_desc') return b.classRank - a.classRank;
+      if (effectiveMatrixSortBy === 'name' || effectiveMatrixSortBy === 'stt') return compareStudentsByUnifiedABC(a.student, b.student);
+      if (effectiveMatrixSortBy === 'name_desc') return compareStudentsByUnifiedABC(b.student, a.student);
+      if (effectiveMatrixSortBy === 'points_desc') return b.netScore - a.netScore || a.classRank - b.classRank;
+      if (effectiveMatrixSortBy === 'points_asc') return a.netScore - b.netScore || a.classRank - b.classRank;
+      if (effectiveMatrixSortBy === 'plus_desc') return b.totalPlus - a.totalPlus || b.netScore - a.netScore;
+      if (effectiveMatrixSortBy === 'plus_asc') return a.totalPlus - b.totalPlus || a.netScore - b.netScore;
+      if (effectiveMatrixSortBy === 'minus_desc') return b.totalMinus - a.totalMinus || a.netScore - b.netScore;
+      if (effectiveMatrixSortBy === 'minus_asc') return a.totalMinus - b.totalMinus || a.netScore - b.netScore;
+      if (effectiveMatrixSortBy === 'group') return a.student.group - b.student.group || compareStudentsByUnifiedABC(a.student, b.student);
+      if (effectiveMatrixSortBy === 'group_desc') return b.student.group - a.student.group || compareStudentsByUnifiedABC(a.student, b.student);
 
       // Handle week sorting: week_X_desc or week_X_asc
-      if (matrixSortBy.startsWith('week_')) {
-        const parts = matrixSortBy.split('_');
+      if (effectiveMatrixSortBy.startsWith('week_')) {
+        const parts = effectiveMatrixSortBy.split('_');
         const weekNum = parseInt(parts[1], 10);
         const direction = parts[2] || 'desc';
 
@@ -362,7 +388,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     });
 
     return list;
-  }, [cumulativeLeaderboard, matrixGroupFilter, matrixSearch, matrixSortBy, classCrossWeekStats]);
+  }, [cumulativeLeaderboard, matrixGroupFilter, matrixSearch, effectiveMatrixSortBy, classCrossWeekStats, shouldHideScores, isPhhs]);
 
   // Matrix Summary Statistics
   const matrixSummaryStats = useMemo(() => {
@@ -387,22 +413,27 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     const weeksData = [];
     for (let w = 1; w <= maxActiveWeek; w++) {
       const weekInfo = getAcademicWeekInfo(w);
+      const isHidden = hiddenWeeksSet.has(w);
       const wStat = classCrossWeekStats[w];
-      const stuScore = wStat?.studentScores[currentStudent.id] || {
-        plus: 0,
-        minus: 0,
-        net: 0,
-        recordsCount: 0,
-        isWarning: false,
-      };
-      const rankInGroup = wStat?.studentRanksInGroup[currentStudent.id] || 1;
-      const rankInClass = wStat?.studentRanksInClass[currentStudent.id] || 1;
-      const groupAverage = wStat?.groupAvg[currentStudent.group] || 0;
-      const classAverage = wStat?.classAvg || 0;
+      const stuScore = isHidden
+        ? { plus: 0, minus: 0, net: 0, recordsCount: 0, isWarning: false }
+        : (wStat?.studentScores[currentStudent.id] || {
+            plus: 0,
+            minus: 0,
+            net: 0,
+            recordsCount: 0,
+            isWarning: false,
+          });
+      const rankInGroup = isHidden ? 0 : (wStat?.studentRanksInGroup[currentStudent.id] || 1);
+      const rankInClass = isHidden ? 0 : (wStat?.studentRanksInClass[currentStudent.id] || 1);
+      const groupAverage = isHidden ? null : (wStat?.groupAvg[currentStudent.group] || 0);
+      const classAverage = isHidden ? null : (wStat?.classAvg || 0);
 
-      const weeklyRecords = records.filter(
-        (r) => (r.studentId === currentStudent.id || r.studentName === currentStudent.name) && r.week === w
-      );
+      const weeklyRecords = isHidden
+        ? []
+        : records.filter(
+            (r) => (r.studentId === currentStudent.id || r.studentName === currentStudent.name) && r.week === w
+          );
 
       weeksData.push({
         week: w,
@@ -410,9 +441,13 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
         fullLabel: weekInfo.fullLabel,
         dateRangeText: weekInfo.dateRangeText,
         semester: weekInfo.semester,
+        isHidden,
         plus: stuScore.plus,
         minus: stuScore.minus,
         net: stuScore.net,
+        chartNet: isHidden ? null : stuScore.net,
+        chartPlus: isHidden ? null : stuScore.plus,
+        chartMinus: isHidden ? null : stuScore.minus,
         rankInGroup,
         rankInClass,
         groupAverage,
@@ -424,7 +459,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     }
 
     return weeksData;
-  }, [currentStudent, maxActiveWeek, classCrossWeekStats, records]);
+  }, [currentStudent, maxActiveWeek, classCrossWeekStats, records, hiddenWeeksSet]);
 
   // Comparison student weekly data
   const compareStudentWeeklyData = useMemo(() => {
@@ -432,28 +467,32 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
     const weeksData = [];
     for (let w = 1; w <= maxActiveWeek; w++) {
+      const isHidden = hiddenWeeksSet.has(w);
       const wStat = classCrossWeekStats[w];
-      const stuScore = wStat?.studentScores[compareStudent.id] || {
-        plus: 0,
-        minus: 0,
-        net: 0,
-        recordsCount: 0,
-        isWarning: false,
-      };
+      const stuScore = isHidden
+        ? { plus: 0, minus: 0, net: 0, recordsCount: 0, isWarning: false }
+        : (wStat?.studentScores[compareStudent.id] || {
+            plus: 0,
+            minus: 0,
+            net: 0,
+            recordsCount: 0,
+            isWarning: false,
+          });
 
       weeksData.push({
         week: w,
         weekName: `Tuần ${w}`,
+        isHidden,
         plus: stuScore.plus,
         minus: stuScore.minus,
-        net: stuScore.net,
-        rankInGroup: wStat?.studentRanksInGroup[compareStudent.id] || 1,
-        rankInClass: wStat?.studentRanksInClass[compareStudent.id] || 1,
+        net: isHidden ? null : stuScore.net,
+        rankInGroup: isHidden ? 0 : (wStat?.studentRanksInGroup[compareStudent.id] || 1),
+        rankInClass: isHidden ? 0 : (wStat?.studentRanksInClass[compareStudent.id] || 1),
       });
     }
 
     return weeksData;
-  }, [compareStudent, maxActiveWeek, classCrossWeekStats]);
+  }, [compareStudent, maxActiveWeek, classCrossWeekStats, hiddenWeeksSet]);
 
   // Combined Chart Data for Comparison
   const comparisonChartData = useMemo(() => {
@@ -462,9 +501,9 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
       return {
         weekName: wData.weekName,
         week: wData.week,
-        [currentStudent.name]: wData.net,
-        [compareStudent.name]: cData ? cData.net : 0,
-        'TB Lớp': wData.classAverage,
+        [currentStudent.name]: wData.isHidden ? null : wData.net,
+        [compareStudent.name]: wData.isHidden ? null : (cData ? cData.net : null),
+        'TB Lớp': wData.isHidden ? null : wData.classAverage,
       };
     });
   }, [studentWeeklyData, compareStudentWeeklyData, currentStudent, compareStudent]);
@@ -473,17 +512,20 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
   const studentProfileKPI = useMemo(() => {
     if (!currentStudent) return null;
 
-    const allStuRecords = records.filter((r) => r.studentId === currentStudent.id || r.studentName === currentStudent.name);
+    const allStuRecords = records.filter(
+      (r) => !hiddenWeeksSet.has(r.week) && (r.studentId === currentStudent.id || r.studentName === currentStudent.name)
+    );
     const totalPlus = allStuRecords.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
     const totalMinus = allStuRecords.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
     const netScore = totalPlus - totalMinus;
 
-    const totalWeeksCounted = Math.max(1, maxActiveWeek);
+    const visibleWeeks = studentWeeklyData.filter((w) => !w.isHidden);
+    const totalWeeksCounted = Math.max(1, visibleWeeks.length);
     const averageScorePerWeek = Number((netScore / totalWeeksCounted).toFixed(2));
 
-    let bestWeek = studentWeeklyData[0];
-    let worstWeek = studentWeeklyData[0];
-    studentWeeklyData.forEach((w) => {
+    let bestWeek = visibleWeeks[0];
+    let worstWeek = visibleWeeks[0];
+    visibleWeeks.forEach((w) => {
       if (!bestWeek || w.net > bestWeek.net) bestWeek = w;
       if (!worstWeek || w.net < worstWeek.net) worstWeek = w;
     });
@@ -537,18 +579,21 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
       totalStudentsInGroup: groupRankings.length,
       bestWeek,
       worstWeek,
+      visibleWeeksCount: visibleWeeks.length,
       recordsCount: allStuRecords.length,
       plusRecordsCount: allStuRecords.filter((r) => r.type === 'plus').length,
       minusRecordsCount: allStuRecords.filter((r) => r.type === 'minus').length,
       schoolErrorsCount: allStuRecords.filter((r) => r.category === 'school_penalty').length,
       badge,
     };
-  }, [currentStudent, records, studentWeeklyData, maxActiveWeek, cumulativeLeaderboard]);
+  }, [currentStudent, records, studentWeeklyData, cumulativeLeaderboard, hiddenWeeksSet]);
 
   // Filtered all-time Activity Log for selected student
   const filteredActivityRecords = useMemo(() => {
     if (!currentStudent) return [];
-    let list = records.filter((r) => r.studentId === currentStudent.id || r.studentName === currentStudent.name);
+    let list = records.filter(
+      (r) => !hiddenWeeksSet.has(r.week) && (r.studentId === currentStudent.id || r.studentName === currentStudent.name)
+    );
 
     if (activityWeekFilter !== 'all') {
       list = list.filter((r) => r.week === activityWeekFilter);
@@ -564,12 +609,22 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     }
 
     return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [records, currentStudent, activityWeekFilter, activityCategoryFilter]);
+  }, [records, currentStudent, activityWeekFilter, activityCategoryFilter, hiddenWeeksSet]);
 
   // Toggle sorting when clicking column headers
   const handleToggleColumnSort = (field: string) => {
+    if (isRestrictedSort) {
+      if (field === 'name') {
+        setMatrixSortBy(effectiveMatrixSortBy === 'name' ? 'name_desc' : 'name');
+      } else if (field === 'group') {
+        setMatrixSortBy(effectiveMatrixSortBy === 'group' ? 'group_desc' : 'group');
+      }
+      return;
+    }
+
     if (field.startsWith('week_')) {
       const weekNum = field.split('_')[1];
+      if (hiddenWeeksSet.has(Number(weekNum))) return;
       if (matrixSortBy === `week_${weekNum}_desc`) {
         setMatrixSortBy(`week_${weekNum}_asc`);
       } else {
@@ -597,6 +652,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
   // Open detail view for a student
   const handleOpenStudentDetail = (studentId: string) => {
+    if (shouldHideScores) return;
     if (isPhhs && myChild && studentId !== myChild.id) {
       return; // Block opening other student details for PHHS
     }
@@ -628,19 +684,31 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
   // Export Matrix Table to CSV
   const handleExportMatrixCSV = () => {
+    if (shouldHideScores) return;
+    const exportList = isPhhs
+      ? cumulativeLeaderboard.filter((item) => isMyChild(item.student))
+      : cumulativeLeaderboard;
+    if (exportList.length === 0) return;
+
+    const visibleWeeksCount = Math.max(
+      1,
+      Array.from({ length: maxActiveWeek }, (_, i) => i + 1).filter((w) => !hiddenWeeksSet.has(w)).length
+    );
+
     const weeksHeader = Array.from({ length: maxActiveWeek }, (_, i) => `Tuần ${i + 1}`).join(',');
     const headers = `STT,Họ và tên,Tổ,Giới tính,Chức vụ,${weeksHeader},Tổng điểm cộng (+),Tổng điểm trừ (-),Tổng điểm ròng,Điểm TB/Tuần,Hạng lớp\n`;
 
-    const rows = cumulativeLeaderboard
+    const rows = exportList
       .map((item, idx) => {
         const stu = item.student;
         const weekScores = Array.from({ length: maxActiveWeek }, (_, i) => {
           const w = i + 1;
+          if (hiddenWeeksSet.has(w)) return 'Bảo mật';
           const wScore = classCrossWeekStats[w]?.studentScores[stu.id]?.net || 0;
           return wScore;
         }).join(',');
 
-        const avg = Number((item.netScore / Math.max(1, maxActiveWeek)).toFixed(2));
+        const avg = Number((item.netScore / visibleWeeksCount).toFixed(2));
         return `${idx + 1},"${stu.name}",Tổ ${stu.group},${stu.gender},"${stu.roleInGroup || 'Thành viên'}",${weekScores},${item.totalPlus},${item.totalMinus},${item.netScore},${avg},${item.classRank}`;
       })
       .join('\n');
@@ -649,15 +717,18 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `Diem_Thi_Dua_${students.length}_Hoc_Sinh_Qua_Cac_Tuan_${classIdLabel}_Tuan_${maxActiveWeek}.csv`);
+    link.setAttribute('download', `Diem_Thi_Dua_${exportList.length}_Hoc_Sinh_Qua_Cac_Tuan_${classIdLabel}_Tuan_${maxActiveWeek}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
   const handlePrint = () => {
+    if (shouldHideScores || isPhhs) return;
     window.print();
   };
+
+  const hideCurrentStudentDetail = shouldHideScores || (isPhhs && !isMyChild(currentStudent));
 
   return (
     <div className="space-y-6">
@@ -697,10 +768,13 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
             }`}
           >
             <User className="w-4 h-4" />
-            <span>Chi Tiết Cá Nhân: {currentStudent?.name || 'Học sinh'}</span>
+            <span>
+              Chi Tiết Cá Nhân:{' '}
+              {hideCurrentStudentDetail ? MASK_STUDENT_NAME : (currentStudent?.name || 'Học sinh')}
+            </span>
           </button>
 
-          {!isPhhs && (
+          {!isPhhs && !shouldHideScores && (
             <button
               onClick={() => setViewMode('comparison')}
               className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
@@ -726,27 +800,29 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
       {viewMode === 'matrix' && (
         <div className="space-y-6">
           {/* Printable Official Report Header (visible on paper print) */}
-          <div className="hidden print:block mb-4 border-b border-slate-700 pb-3">
-            <div className="flex justify-between items-start text-xs text-slate-800">
-              <div className="text-left font-bold uppercase leading-tight">
-                <p>TRƯỜNG THCS NGUYỄN ĐĂNG ĐẠO</p>
-                <p>{className.toUpperCase()} • NĂM HỌC 2026 - 2027</p>
+          {!(shouldHideScores || isPhhs) && (
+            <div className="hidden print:block mb-4 border-b border-slate-700 pb-3">
+              <div className="flex justify-between items-start text-xs text-slate-800">
+                <div className="text-left font-bold uppercase leading-tight">
+                  <p>TRƯỜNG THCS NGUYỄN ĐĂNG ĐẠO</p>
+                  <p>{className.toUpperCase()} • NĂM HỌC 2026 - 2027</p>
+                </div>
+                <div className="text-right leading-tight">
+                  <p className="font-bold uppercase">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</p>
+                  <p className="italic text-[10px]">Độc lập - Tự do - Hạnh phúc</p>
+                  <p className="text-[10px] mt-1 text-slate-600">Ngày in: {new Date().toLocaleDateString('vi-VN')}</p>
+                </div>
               </div>
-              <div className="text-right leading-tight">
-                <p className="font-bold uppercase">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</p>
-                <p className="italic text-[10px]">Độc lập - Tự do - Hạnh phúc</p>
-                <p className="text-[10px] mt-1 text-slate-600">Ngày in: {new Date().toLocaleDateString('vi-VN')}</p>
+              <div className="text-center mt-3">
+                <h1 className="text-base font-black uppercase text-slate-900 tracking-wide">
+                  BẢNG MA TRẬN ĐIỂM THI ĐUA {students.length} HỌC SINH QUA CÁC TUẦN
+                </h1>
+                <p className="text-[11px] italic text-slate-700 mt-0.5">
+                  Tổng hợp diễn biến điểm số thi đua cả năm • Sĩ số: {students.length} Học sinh / 4 Tổ
+                </p>
               </div>
             </div>
-            <div className="text-center mt-3">
-              <h1 className="text-base font-black uppercase text-slate-900 tracking-wide">
-                BẢNG MA TRẬN ĐIỂM THI ĐUA {students.length} HỌC SINH QUA CÁC TUẦN
-              </h1>
-              <p className="text-[11px] italic text-slate-700 mt-0.5">
-                Tổng hợp diễn biến điểm số thi đua cả năm • Sĩ số: {students.length} Học sinh / 4 Tổ
-              </p>
-            </div>
-          </div>
+          )}
 
           {/* Privacy Notice when shouldHideScores is active */}
           {shouldHideScores && (
@@ -798,22 +874,26 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
               {/* Action Buttons */}
               <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  onClick={handleExportMatrixCSV}
-                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition cursor-pointer"
-                  title="Tải bảng điểm ma trận ra file Excel (.CSV)"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                  <span>Xuất Excel / CSV</span>
-                </button>
-                <button
-                  onClick={handlePrint}
-                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-                  title="In bảng điểm"
-                >
-                  <Printer className="w-4 h-4 text-slate-600" />
-                  <span>In bảng</span>
-                </button>
+                {!shouldHideScores && (
+                  <button
+                    onClick={handleExportMatrixCSV}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition cursor-pointer"
+                    title="Tải bảng điểm ma trận ra file Excel (.CSV)"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                    <span>{isPhhs ? 'Xuất CSV (Con của bạn)' : 'Xuất Excel / CSV'}</span>
+                  </button>
+                )}
+                {!(shouldHideScores || isPhhs) && (
+                  <button
+                    onClick={handlePrint}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+                    title="In bảng điểm"
+                  >
+                    <Printer className="w-4 h-4 text-slate-600" />
+                    <span>In bảng</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -822,36 +902,46 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
               <div className="bg-blue-50/70 p-3 rounded-2xl border border-blue-200/80">
                 <span className="text-[11px] font-bold text-blue-700 block">Quy Mô Lớp</span>
                 <span className="text-2xl font-black text-blue-900 mt-0.5 block">
-                  36 <span className="text-xs font-medium text-blue-600">Học sinh / 4 Tổ (9 HS / Tổ)</span>
+                  {students.length || 36} <span className="text-xs font-medium text-blue-600">Học sinh / 4 Tổ</span>
                 </span>
               </div>
 
               <div className="bg-emerald-50/70 p-3 rounded-2xl border border-emerald-200/80">
                 <span className="text-[11px] font-bold text-emerald-700 block">ĐTB Lớp Tích Lũy</span>
-                <span className={`text-2xl font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-emerald-700'} mt-0.5 block`}>
-                  {shouldHideScores ? '???' : (matrixSummaryStats.avgScore > 0 ? `+${matrixSummaryStats.avgScore}` : matrixSummaryStats.avgScore)} {shouldHideScores ? '' : 'đ'}
+                <span className="text-2xl font-black text-emerald-700 mt-0.5 block">
+                  {shouldHideScores ? MASK_SCORE : (matrixSummaryStats.avgScore > 0 ? `+${matrixSummaryStats.avgScore}` : matrixSummaryStats.avgScore)} {shouldHideScores ? '' : 'đ'}
                 </span>
               </div>
 
-              <div className="bg-amber-50/70 p-3 rounded-2xl border border-amber-200/80">
-                <span className="text-[11px] font-bold text-amber-700 block">🥇 Dẫn Đầu Thi Đua</span>
-                <span className={`text-base font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-amber-900'} truncate mt-0.5 block`}>
-                  {shouldHideScores ? 'Học sinh Bảo mật' : (matrixSummaryStats.topLeader?.student.name || '—')}
-                </span>
-                <span className="text-[10px] text-amber-700 block font-semibold">
-                  {shouldHideScores ? 'Tổ ??? • ???đ' : `Tổ ${matrixSummaryStats.topLeader?.student.group} • +${matrixSummaryStats.topLeader?.netScore}đ`}
-                </span>
-              </div>
+              {(() => {
+                const leaderMasked = shouldHideScores || (isPhhs && !isMyChild(matrixSummaryStats.topLeader?.student));
+                return (
+                  <div className="bg-amber-50/70 p-3 rounded-2xl border border-amber-200/80">
+                    <span className="text-[11px] font-bold text-amber-700 block">🥇 Dẫn Đầu Thi Đua</span>
+                    <span className="text-base font-black text-amber-900 truncate mt-0.5 block">
+                      {leaderMasked ? MASK_STUDENT_NAME : (matrixSummaryStats.topLeader?.student.name || '—')}
+                    </span>
+                    <span className="text-[10px] text-amber-700 block font-semibold">
+                      {leaderMasked ? `Tổ ? • ${MASK_SCORE}đ` : `Tổ ${matrixSummaryStats.topLeader?.student.group} • +${matrixSummaryStats.topLeader?.netScore}đ`}
+                    </span>
+                  </div>
+                );
+              })()}
 
-              <div className="bg-indigo-50/70 p-3 rounded-2xl border border-indigo-200/80">
-                <span className="text-[11px] font-bold text-indigo-700 block">🌸 Tích Cực Nhất (+)</span>
-                <span className={`text-base font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-indigo-900'} truncate mt-0.5 block`}>
-                  {shouldHideScores ? 'Học sinh Bảo mật' : (matrixSummaryStats.topPlus?.student.name || '—')}
-                </span>
-                <span className="text-[10px] text-indigo-700 block font-semibold">
-                  {shouldHideScores ? '???đ thưởng' : `+${matrixSummaryStats.topPlus?.totalPlus}đ thưởng`}
-                </span>
-              </div>
+              {(() => {
+                const topPlusMasked = shouldHideScores || (isPhhs && !isMyChild(matrixSummaryStats.topPlus?.student));
+                return (
+                  <div className="bg-indigo-50/70 p-3 rounded-2xl border border-indigo-200/80">
+                    <span className="text-[11px] font-bold text-indigo-700 block">🌸 Tích Cực Nhất (+)</span>
+                    <span className="text-base font-black text-indigo-900 truncate mt-0.5 block">
+                      {topPlusMasked ? MASK_STUDENT_NAME : (matrixSummaryStats.topPlus?.student.name || '—')}
+                    </span>
+                    <span className="text-[10px] text-indigo-700 block font-semibold">
+                      {topPlusMasked ? `${MASK_SCORE}đ thưởng` : `+${matrixSummaryStats.topPlus?.totalPlus}đ thưởng`}
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Filter and Search Bar */}
@@ -901,41 +991,54 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                 <div className="flex items-center gap-1">
                   <select
-                    value={matrixSortBy}
+                    value={effectiveMatrixSortBy}
                     onChange={(e) => setMatrixSortBy(e.target.value as any)}
                     className="rounded-xl border border-slate-200 py-1.5 px-2.5 text-xs font-semibold bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer max-w-[240px] truncate"
                   >
-                    <optgroup label="📅 SẮP XẾP THEO TUẦN (ĐIỂM CAO → THẤP)">
-                      {Array.from({ length: maxActiveWeek }, (_, idx) => {
-                        const w = idx + 1;
-                        return (
-                          <option key={`week_${w}_desc`} value={`week_${w}_desc`}>
-                            Tuần {w} (Điểm cao → thấp) {w === currentWeek ? '⭐' : ''}
-                          </option>
-                        );
-                      })}
-                    </optgroup>
-                    <optgroup label="📅 SẮP XẾP THEO TUẦN (ĐIỂM THẤP → CAO)">
-                      {Array.from({ length: maxActiveWeek }, (_, idx) => {
-                        const w = idx + 1;
-                        return (
-                          <option key={`week_${w}_asc`} value={`week_${w}_asc`}>
-                            Tuần {w} (Điểm thấp → cao)
-                          </option>
-                        );
-                      })}
-                    </optgroup>
-                    <optgroup label="🏆 SẮP XẾP TÍCH LŨY CẢ KỲ">
-                      <option value="stt">Theo danh sách lớp ABC (STT 1 → 36)</option>
-                      <option value="rank">Hạng Lớp tích lũy (Top 1 → 36)</option>
-                      <option value="points_desc">Tổng Điểm Ròng Giảm Dần</option>
-                      <option value="points_asc">Tổng Điểm Ròng Tăng Dần</option>
-                      <option value="plus_desc">Điểm Thưởng (+) Nhiều Nhất</option>
-                      <option value="minus_desc">Điểm Trừ (-) Nhiều Nhất</option>
-                      <option value="name">Tên học sinh ABC (An → Vũ)</option>
-                      <option value="name_desc">Tên học sinh ngược (Vũ → An)</option>
-                      <option value="group">Theo Tổ (Tổ 1 → 4, trong tổ xếp ABC)</option>
-                    </optgroup>
+                    {isRestrictedSort ? (
+                      <>
+                        <option value="name">Tên học sinh ABC (An → Vũ)</option>
+                        <option value="name_desc">Tên học sinh ngược (Vũ → An)</option>
+                        <option value="group">Theo Tổ (Tổ 1 → 4, xếp ABC)</option>
+                        <option value="group_desc">Theo Tổ ngược (Tổ 4 → 1)</option>
+                      </>
+                    ) : (
+                      <>
+                        <optgroup label="📅 SẮP XẾP THEO TUẦN (ĐIỂM CAO → THẤP)">
+                          {Array.from({ length: maxActiveWeek }, (_, idx) => {
+                            const w = idx + 1;
+                            if (hiddenWeeksSet.has(w)) return null;
+                            return (
+                              <option key={`week_${w}_desc`} value={`week_${w}_desc`}>
+                                Tuần {w} (Điểm cao → thấp) {w === currentWeek ? '⭐' : ''}
+                              </option>
+                            );
+                          })}
+                        </optgroup>
+                        <optgroup label="📅 SẮP XẾP THEO TUẦN (ĐIỂM THẤP → CAO)">
+                          {Array.from({ length: maxActiveWeek }, (_, idx) => {
+                            const w = idx + 1;
+                            if (hiddenWeeksSet.has(w)) return null;
+                            return (
+                              <option key={`week_${w}_asc`} value={`week_${w}_asc`}>
+                                Tuần {w} (Điểm thấp → cao)
+                              </option>
+                            );
+                          })}
+                        </optgroup>
+                        <optgroup label="🏆 SẮP XẾP TÍCH LŨY CẢ KỲ">
+                          <option value="stt">Theo danh sách lớp ABC (STT 1 → 36)</option>
+                          <option value="rank">Hạng Lớp tích lũy (Top 1 → 36)</option>
+                          <option value="points_desc">Tổng Điểm Ròng Giảm Dần</option>
+                          <option value="points_asc">Tổng Điểm Ròng Tăng Dần</option>
+                          <option value="plus_desc">Điểm Thưởng (+) Nhiều Nhất</option>
+                          <option value="minus_desc">Điểm Trừ (-) Nhiều Nhất</option>
+                          <option value="name">Tên học sinh ABC (An → Vũ)</option>
+                          <option value="name_desc">Tên học sinh ngược (Vũ → An)</option>
+                          <option value="group">Theo Tổ (Tổ 1 → 4, trong tổ xếp ABC)</option>
+                        </optgroup>
+                      </>
+                    )}
                   </select>
                 </div>
               </div>
@@ -950,10 +1053,10 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                 <span className="font-extrabold text-sm text-slate-800">
                   Dữ liệu Điểm Ròng Từng Tuần (Tuần 1 – Tuần {maxActiveWeek})
                 </span>
-                {matrixSortBy.startsWith('week_') && (
+                {effectiveMatrixSortBy.startsWith('week_') && (
                   <span className="px-2 py-0.5 rounded-md bg-blue-100 text-blue-800 font-bold text-[11px] border border-blue-200 flex items-center gap-1">
                     <ArrowUpDown className="w-3 h-3" />
-                    Đang xếp theo Tuần {matrixSortBy.split('_')[1]} ({matrixSortBy.endsWith('_desc') ? 'Cao → Thấp' : 'Thấp → Cao'})
+                    Đang xếp theo Tuần {effectiveMatrixSortBy.split('_')[1]} ({effectiveMatrixSortBy.endsWith('_desc') ? 'Cao → Thấp' : 'Thấp → Cao'})
                   </span>
                 )}
               </div>
@@ -969,17 +1072,19 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     {/* Cột Hạng */}
                     <th
                       onClick={() => handleToggleColumnSort('rank')}
-                      className={`py-3 px-3 text-center w-12 cursor-pointer transition hover:bg-slate-100 ${
-                        matrixSortBy === 'rank' || matrixSortBy === 'rank_desc'
+                      className={`py-3 px-3 text-center w-12 transition ${
+                        !isRestrictedSort ? 'cursor-pointer hover:bg-slate-100' : ''
+                      } ${
+                        effectiveMatrixSortBy === 'rank' || effectiveMatrixSortBy === 'rank_desc'
                           ? 'bg-blue-100/60 text-blue-900 font-black'
                           : ''
                       }`}
-                      title="Bấm để sắp xếp theo Hạng tích lũy"
+                      title={isRestrictedSort ? 'Hạng đang bảo mật' : 'Bấm để sắp xếp theo Hạng tích lũy'}
                     >
                       <div className="flex items-center justify-center gap-0.5">
                         <span>Hạng</span>
-                        {matrixSortBy === 'rank' && <span className="text-blue-600 font-black">↑</span>}
-                        {matrixSortBy === 'rank_desc' && <span className="text-blue-600 font-black">↓</span>}
+                        {effectiveMatrixSortBy === 'rank' && <span className="text-blue-600 font-black">↑</span>}
+                        {effectiveMatrixSortBy === 'rank_desc' && <span className="text-blue-600 font-black">↓</span>}
                       </div>
                     </th>
 
@@ -987,7 +1092,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     <th
                       onClick={() => handleToggleColumnSort('name')}
                       className={`py-3 px-4 min-w-[180px] sticky left-0 bg-slate-50 z-10 shadow-[1px_0_0_#e2e8f0] cursor-pointer transition hover:bg-slate-100 ${
-                        matrixSortBy === 'name' || matrixSortBy === 'name_desc'
+                        effectiveMatrixSortBy === 'name' || effectiveMatrixSortBy === 'name_desc'
                           ? 'bg-blue-100/60 text-blue-900 font-black'
                           : ''
                       }`}
@@ -995,8 +1100,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     >
                       <div className="flex items-center gap-1">
                         <span>Họ và Tên Học Sinh</span>
-                        {matrixSortBy === 'name' && <span className="text-blue-600 font-black">↑ (A-Z)</span>}
-                        {matrixSortBy === 'name_desc' && <span className="text-blue-600 font-black">↓ (Z-A)</span>}
+                        {effectiveMatrixSortBy === 'name' && <span className="text-blue-600 font-black">↑ (A-Z)</span>}
+                        {effectiveMatrixSortBy === 'name_desc' && <span className="text-blue-600 font-black">↓ (Z-A)</span>}
                       </div>
                     </th>
 
@@ -1004,7 +1109,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     <th
                       onClick={() => handleToggleColumnSort('group')}
                       className={`py-3 px-2 text-center w-16 cursor-pointer transition hover:bg-slate-100 ${
-                        matrixSortBy === 'group' || matrixSortBy === 'group_desc'
+                        effectiveMatrixSortBy === 'group' || effectiveMatrixSortBy === 'group_desc'
                           ? 'bg-blue-100/60 text-blue-900 font-black'
                           : ''
                       }`}
@@ -1012,8 +1117,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     >
                       <div className="flex items-center justify-center gap-0.5">
                         <span>Tổ</span>
-                        {matrixSortBy === 'group' && <span className="text-blue-600 font-black">↑</span>}
-                        {matrixSortBy === 'group_desc' && <span className="text-blue-600 font-black">↓</span>}
+                        {effectiveMatrixSortBy === 'group' && <span className="text-blue-600 font-black">↑</span>}
+                        {effectiveMatrixSortBy === 'group_desc' && <span className="text-blue-600 font-black">↓</span>}
                       </div>
                     </th>
 
@@ -1021,24 +1126,30 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     {Array.from({ length: maxActiveWeek }, (_, idx) => {
                       const w = idx + 1;
                       const isCurrentActive = w === currentWeek;
-                      const isSortedWeek = matrixSortBy.startsWith(`week_${w}_`);
-                      const isDesc = matrixSortBy === `week_${w}_desc`;
+                      const isWeekColHidden = hiddenWeeksSet.has(w);
+                      const isSortedWeek = effectiveMatrixSortBy.startsWith(`week_${w}_`);
+                      const isDesc = effectiveMatrixSortBy === `week_${w}_desc`;
 
                       return (
                         <th
                           key={w}
-                          onClick={() => handleToggleColumnSort(`week_${w}`)}
-                          className={`py-3 px-2 text-center min-w-[66px] cursor-pointer transition hover:bg-blue-100/80 ${
-                            isSortedWeek
+                          onClick={() => !isWeekColHidden && !isRestrictedSort && handleToggleColumnSort(`week_${w}`)}
+                          className={`py-3 px-2 text-center min-w-[66px] transition ${
+                            isWeekColHidden || isRestrictedSort ? '' : 'cursor-pointer hover:bg-blue-100/80'
+                          } ${
+                            isWeekColHidden
+                              ? 'bg-amber-50/70 text-amber-700'
+                              : isSortedWeek
                               ? 'bg-blue-600 text-white font-black shadow-xs'
                               : isCurrentActive
                               ? 'bg-blue-100/70 text-blue-900 font-black'
                               : ''
                           }`}
-                          title={`Bấm để sắp xếp danh sách theo điểm Tuần ${w} (${isSortedWeek && isDesc ? 'Đang cao → thấp, bấm để đảo ngược' : 'Sắp xếp cao → thấp'})`}
+                          title={isWeekColHidden ? `Tuần ${w} đang tạm ẩn` : `T.${w}`}
                         >
                           <div className="flex items-center justify-center gap-0.5">
                             <span>T.{w}</span>
+                            {isWeekColHidden && <Lock className="w-2.5 h-2.5 text-amber-600" />}
                             {isSortedWeek && (
                               <span className="text-[10px] font-black">{isDesc ? '↓' : '↑'}</span>
                             )}
@@ -1119,26 +1230,33 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     const stu = item.student;
                     const isChild = isMyChild(stu);
                     const hideForOtherPhhs = isPhhs && !isChild;
-                    const isTop1 = item.classRank === 1;
-                    const isTop2 = item.classRank === 2;
-                    const isTop3 = item.classRank === 3;
-                    const avgWeekly = Number((item.netScore / Math.max(1, maxActiveWeek)).toFixed(1));
+                    const hideRowSensitive = shouldHideScores || hideForOtherPhhs;
+                    const isTop1 = !hideRowSensitive && item.classRank === 1;
+                    const isTop2 = !hideRowSensitive && item.classRank === 2;
+                    const isTop3 = !hideRowSensitive && item.classRank === 3;
+                    const visibleWeeksCount = Math.max(
+                      1,
+                      Array.from({ length: maxActiveWeek }, (_, i) => i + 1).filter((w) => !hiddenWeeksSet.has(w)).length
+                    );
+                    const avgWeekly = Number((item.netScore / visibleWeeksCount).toFixed(1));
 
                     return (
                       <tr
                         key={stu.id}
-                        onClick={() => !hideForOtherPhhs ? handleOpenStudentDetail(stu.id) : null}
+                        onClick={() => (!hideRowSensitive ? handleOpenStudentDetail(stu.id) : null)}
                         className={`transition ${
-                          isChild
+                          isChild && !shouldHideScores
                             ? 'bg-amber-50/90 ring-2 ring-amber-400 font-medium'
-                            : hideForOtherPhhs
+                            : hideRowSensitive
                             ? 'bg-slate-50/40 cursor-not-allowed opacity-85'
                             : 'hover:bg-blue-50/50 cursor-pointer'
                         } group`}
                       >
                         {/* Hạng Lớp */}
                         <td className="py-3 px-3 text-center">
-                          {isTop1 ? (
+                          {hideRowSensitive ? (
+                            <span className="font-bold text-slate-400">{MASK_RANK}</span>
+                          ) : isTop1 ? (
                             <span className="w-6 h-6 mx-auto rounded-full bg-amber-400 text-amber-950 font-black text-xs flex items-center justify-center shadow-xs">
                               1
                             </span>
@@ -1157,26 +1275,30 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                         {/* Họ và Tên (Sticky) */}
                         <td className={`py-3 px-4 font-bold text-slate-800 sticky left-0 z-10 shadow-[1px_0_0_#e2e8f0] transition ${
-                          isChild ? 'bg-amber-50' : 'bg-white group-hover:bg-blue-50/50'
+                          isChild && !shouldHideScores ? 'bg-amber-50' : 'bg-white group-hover:bg-blue-50/50'
                         }`}>
                           <div className="flex items-center gap-2">
                             <div className={`w-7 h-7 rounded-lg text-xs font-black flex items-center justify-center shrink-0 ${
-                              isChild ? 'bg-amber-500 text-white shadow-xs' : 'bg-blue-100 text-blue-700'
+                              hideRowSensitive
+                                ? 'bg-slate-100 text-slate-400'
+                                : isChild
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'bg-blue-100 text-blue-700'
                             }`}>
-                              {stu.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
+                              {hideRowSensitive ? 'BM' : stu.name.split(' ').slice(-1)[0].slice(0, 2).toUpperCase()}
                             </div>
                             <div>
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="font-bold text-slate-900 group-hover:text-blue-600 transition block">
-                                  {stu.name}
+                                <span className={`font-bold transition block ${hideRowSensitive ? 'text-slate-400' : 'text-slate-900 group-hover:text-blue-600'}`}>
+                                  {hideRowSensitive ? MASK_STUDENT_NAME : stu.name}
                                 </span>
-                                {isChild && (
+                                {isChild && !shouldHideScores && (
                                   <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-500 text-white shrink-0">
                                     Con của bạn
                                   </span>
                                 )}
                               </div>
-                              {stu.roleInGroup && (
+                              {!hideRowSensitive && stu.roleInGroup && (
                                 <span className="text-[10px] text-amber-800 font-semibold">
                                   {stu.roleInGroup}
                                 </span>
@@ -1188,7 +1310,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         {/* Tổ */}
                         <td className="py-3 px-2 text-center">
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                            T{stu.group}
+                            {hideRowSensitive ? 'T?' : `T${stu.group}`}
                           </span>
                         </td>
 
@@ -1196,7 +1318,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         {Array.from({ length: maxActiveWeek }, (_, idx) => {
                           const w = idx + 1;
                           const isCurrentActive = w === currentWeek;
-                          const isSortedWeek = matrixSortBy.startsWith(`week_${w}_`);
+                          const isWeekColHidden = hiddenWeeksSet.has(w);
+                          const isSortedWeek = effectiveMatrixSortBy.startsWith(`week_${w}_`);
                           const wScore = classCrossWeekStats[w]?.studentScores[stu.id]?.net || 0;
                           const wRecordsCount = classCrossWeekStats[w]?.studentScores[stu.id]?.recordsCount || 0;
 
@@ -1213,8 +1336,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                                   : ''
                               }`}
                             >
-                              {hideForOtherPhhs ? (
-                                <span className="text-slate-400 font-bold text-[10px]">***</span>
+                              {hideRowSensitive || isWeekColHidden ? (
+                                <span className="text-slate-400 font-bold text-[10px]">{MASK_SCORE}</span>
                               ) : wRecordsCount > 0 || wScore !== 0 ? (
                                 <span
                                   className={`inline-block px-1.5 py-0.5 rounded-md font-bold text-[11px] ${
@@ -1242,8 +1365,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                         {/* Thưởng (+) */}
                         <td className="py-3 px-3 text-center font-bold text-emerald-600 bg-emerald-50/30">
-                          {hideForOtherPhhs ? (
-                            <span className="text-slate-400 font-bold text-xs">***</span>
+                          {hideRowSensitive ? (
+                            <span className="text-slate-400 font-bold text-xs">{MASK_SCORE}</span>
                           ) : (
                             item.totalPlus > 0 ? `+${item.totalPlus}` : '0'
                           )}
@@ -1251,8 +1374,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                         {/* Trừ (-) */}
                         <td className="py-3 px-3 text-center font-bold text-rose-600 bg-rose-50/30">
-                          {hideForOtherPhhs ? (
-                            <span className="text-slate-400 font-bold text-xs">***</span>
+                          {hideRowSensitive ? (
+                            <span className="text-slate-400 font-bold text-xs">{MASK_SCORE}</span>
                           ) : (
                             item.totalMinus > 0 ? `-${item.totalMinus}` : '0'
                           )}
@@ -1260,9 +1383,9 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                         {/* Tổng Điểm Ròng */}
                         <td className="py-3 px-3 text-center bg-blue-50/40">
-                          {hideForOtherPhhs ? (
+                          {hideRowSensitive ? (
                             <span className="inline-block px-2 py-0.5 rounded-lg bg-slate-100 text-slate-400 font-bold text-xs">
-                              *** (Bảo mật)
+                              {MASK_SCORE}
                             </span>
                           ) : (
                             <span
@@ -1281,8 +1404,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                         {/* ĐTB/Tuần */}
                         <td className="py-3 px-3 text-center font-semibold text-indigo-700">
-                          {hideForOtherPhhs ? (
-                            <span className="text-slate-400 font-bold text-xs">***</span>
+                          {hideRowSensitive ? (
+                            <span className="text-slate-400 font-bold text-xs">{MASK_SCORE}</span>
                           ) : (
                             `${avgWeekly}đ`
                           )}
@@ -1290,11 +1413,11 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
 
                         {/* Hành động: Nút Xem Chi Tiết */}
                         <td className="py-3 px-3 text-center">
-                          {hideForOtherPhhs ? (
+                          {hideRowSensitive ? (
                             <button
                               disabled
                               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60"
-                              title="Bảo mật: Phụ huynh chỉ xem chi tiết của con"
+                              title="Bảo mật: Dữ liệu hiện đang tạm ẩn"
                             >
                               <Lock className="w-3.5 h-3.5" />
                               <span>Bảo mật</span>
@@ -1353,27 +1476,29 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
       {viewMode === 'detail' && currentStudent && studentProfileKPI && (
         <div className="space-y-6 animate-in fade-in duration-150">
           {/* Printable Official Report Header (visible on paper print) */}
-          <div className="hidden print:block mb-4 border-b border-slate-700 pb-3">
-            <div className="flex justify-between items-start text-xs text-slate-800">
-              <div className="text-left font-bold uppercase leading-tight">
-                <p>TRƯỜNG THCS NGUYỄN ĐĂNG ĐẠO</p>
-                <p>{className.toUpperCase()} • NĂM HỌC 2026 - 2027</p>
+          {!hideCurrentStudentDetail && !isPhhs && (
+            <div className="hidden print:block mb-4 border-b border-slate-700 pb-3">
+              <div className="flex justify-between items-start text-xs text-slate-800">
+                <div className="text-left font-bold uppercase leading-tight">
+                  <p>TRƯỜNG THCS NGUYỄN ĐĂNG ĐẠO</p>
+                  <p>{className.toUpperCase()} • NĂM HỌC 2026 - 2027</p>
+                </div>
+                <div className="text-right leading-tight">
+                  <p className="font-bold uppercase">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</p>
+                  <p className="italic text-[10px]">Độc lập - Tự do - Hạnh phúc</p>
+                  <p className="text-[10px] mt-1 text-slate-600">Ngày in: {new Date().toLocaleDateString('vi-VN')}</p>
+                </div>
               </div>
-              <div className="text-right leading-tight">
-                <p className="font-bold uppercase">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</p>
-                <p className="italic text-[10px]">Độc lập - Tự do - Hạnh phúc</p>
-                <p className="text-[10px] mt-1 text-slate-600">Ngày in: {new Date().toLocaleDateString('vi-VN')}</p>
+              <div className="text-center mt-3">
+                <h1 className="text-base font-black uppercase text-slate-900 tracking-wide">
+                  HỒ SƠ THEO DÕI THI ĐUA &amp; RÈN LUYỆN CÁ NHÂN
+                </h1>
+                <p className="text-[11px] italic text-slate-700 mt-0.5">
+                  Học sinh: {currentStudent.name} • STT: #{currentStudent.stt || ''} • Tổ: {currentStudent.group}
+                </p>
               </div>
             </div>
-            <div className="text-center mt-3">
-              <h1 className="text-base font-black uppercase text-slate-900 tracking-wide">
-                HỒ SƠ THEO DÕI THI ĐUA &amp; RÈN LUYỆN CÁ NHÂN
-              </h1>
-              <p className="text-[11px] italic text-slate-700 mt-0.5">
-                Học sinh: {currentStudent.name} • STT: #{currentStudent.stt || ''} • Tổ: {currentStudent.group}
-              </p>
-            </div>
-          </div>
+          )}
           {/* Top Sticky Navigation Return Bar */}
           <div className="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200/80 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <button
@@ -1381,7 +1506,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
               className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-black text-xs transition cursor-pointer active:scale-95 self-start"
             >
               <ArrowLeft className="w-4 h-4" />
-              <span>← Quay lại Bảng Ma Trận 36 học sinh</span>
+              <span>← Quay lại Bảng Ma Trận {students.length || 36} học sinh</span>
             </button>
 
             {/* Quick Student Switcher */}
@@ -1389,9 +1514,9 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
               {isPhhs ? (
                 <div className="px-3.5 py-1.5 rounded-xl bg-amber-50 text-amber-900 border border-amber-300 font-bold text-xs flex items-center gap-1.5 shadow-2xs">
                   <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                  <span>Hồ sơ học sinh: <b>{myChild?.name || currentStudent.name}</b> (Con của bạn)</span>
+                  <span>Hồ sơ học sinh: <b>{myChild?.name || MASK_STUDENT_NAME}</b> (Con của bạn)</span>
                 </div>
-              ) : (
+              ) : !shouldHideScores ? (
                 <>
                   <div className="flex items-center gap-1">
                     <button
@@ -1434,18 +1559,35 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     <span>So sánh với bạn khác</span>
                   </button>
                 </>
-              )}
+              ) : null}
 
-              <button
-                onClick={handlePrint}
-                className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer flex items-center gap-1.5"
-                title="In phiếu thi đua cá nhân"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>In phiếu</span>
-              </button>
+              {!hideCurrentStudentDetail && !isPhhs && (
+                <button
+                  onClick={handlePrint}
+                  className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer flex items-center gap-1.5"
+                  title="In phiếu thi đua cá nhân"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>In phiếu</span>
+                </button>
+              )}
             </div>
           </div>
+
+          {hideCurrentStudentDetail ? (
+            <div className="bg-amber-50/90 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-700/80 rounded-3xl p-8 text-center space-y-3 shadow-xs">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center mx-auto shadow-xs">
+                <Lock className="w-6 h-6" />
+              </div>
+              <h3 className="font-black text-base text-amber-950 dark:text-amber-200">
+                Hồ Sơ Điểm Cá Nhân Đang Được Bảo Mật
+              </h3>
+              <p className="text-xs text-amber-900/80 dark:text-amber-300/90 max-w-md mx-auto leading-relaxed">
+                Theo cấu hình bảo mật hiện tại, thông tin điểm số, biểu đồ tiến trình và nhật ký sự vụ chi tiết của học sinh này không được hiển thị.
+              </p>
+            </div>
+          ) : (
+            <>
 
           {/* Individual Profile & 6 KPI Metric Tiles */}
           <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/80 shadow-xs">
@@ -1535,7 +1677,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                   <span className="text-xs text-indigo-500">đ/tuần</span>
                 </div>
                 <span className="text-[10px] text-indigo-600 mt-1 block">
-                  Tính trên {maxActiveWeek} tuần học
+                  Tính trên {studentProfileKPI.visibleWeeksCount} tuần hiển thị
                 </span>
               </div>
 
@@ -1661,13 +1803,14 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                     <Legend iconType="circle" wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
                     <Area
                       type="monotone"
-                      dataKey="net"
+                      dataKey="chartNet"
                       name={`Điểm ròng ${currentStudent.name}`}
                       fill="url(#studentScoreGradient)"
                       stroke="#2563eb"
                       strokeWidth={3}
                       dot={{ r: 5, fill: '#2563eb' }}
                       activeDot={{ r: 7 }}
+                      connectNulls={false}
                     />
                     <Line
                       type="monotone"
@@ -1677,6 +1820,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                       strokeDasharray="3 3"
                       strokeWidth={2}
                       dot={{ r: 3 }}
+                      connectNulls={false}
                     />
                     <Line
                       type="monotone"
@@ -1686,6 +1830,7 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                       strokeDasharray="4 4"
                       strokeWidth={2}
                       dot={{ r: 3 }}
+                      connectNulls={false}
                     />
                   </ComposedChart>
                 ) : (
@@ -1705,8 +1850,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                       itemStyle={{ color: isDark ? '#f8fafc' : '#0f172a' }}
                     />
                     <Legend iconType="circle" wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-                    <Bar dataKey="plus" name="Điểm cộng (+)" fill="#10b981" radius={[6, 6, 0, 0]} />
-                    <Bar dataKey="minus" name="Điểm trừ (-)" fill="#f43f5e" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="chartPlus" name="Điểm cộng (+)" fill="#10b981" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="chartMinus" name="Điểm trừ (-)" fill="#f43f5e" radius={[6, 6, 0, 0]} />
                   </BarChart>
                 )}
               </ResponsiveContainer>
@@ -1774,7 +1919,9 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         </td>
 
                         <td className="py-3 px-3 text-center font-bold text-emerald-600">
-                          {w.plus > 0 ? (
+                          {w.isHidden ? (
+                            <span className="text-slate-400 font-bold">{MASK_SCORE}</span>
+                          ) : w.plus > 0 ? (
                             <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
                               +{w.plus}
                             </span>
@@ -1784,7 +1931,9 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         </td>
 
                         <td className="py-3 px-3 text-center font-bold text-rose-600">
-                          {w.minus > 0 ? (
+                          {w.isHidden ? (
+                            <span className="text-slate-400 font-bold">{MASK_SCORE}</span>
+                          ) : w.minus > 0 ? (
                             <div className="inline-flex flex-col items-center">
                               <span className="px-2 py-0.5 rounded-lg bg-rose-50 text-rose-700 border border-rose-200">
                                 -{w.minus}
@@ -1801,21 +1950,29 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         </td>
 
                         <td className="py-3 px-4 text-center">
-                          <span
-                            className={`inline-block px-3 py-1 rounded-xl font-black text-xs ${
-                              w.net > 0
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : w.net < 0
-                                ? 'bg-rose-100 text-rose-800'
-                                : 'bg-slate-100 text-slate-600'
-                            }`}
-                          >
-                            {w.net > 0 ? `+${w.net}` : w.net} đ
-                          </span>
+                          {w.isHidden ? (
+                            <span className="inline-block px-3 py-1 rounded-xl font-bold text-xs bg-slate-100 text-slate-400">
+                              {MASK_SCORE}
+                            </span>
+                          ) : (
+                            <span
+                              className={`inline-block px-3 py-1 rounded-xl font-black text-xs ${
+                                w.net > 0
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : w.net < 0
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : 'bg-slate-100 text-slate-600'
+                              }`}
+                            >
+                              {w.net > 0 ? `+${w.net}` : w.net} đ
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-3 px-3 text-center font-semibold text-slate-700">
-                          {w.recordsCount > 0 || w.net !== 0 ? (
+                          {w.isHidden ? (
+                            <span className="text-slate-400 font-bold">{MASK_RANK}</span>
+                          ) : w.recordsCount > 0 || w.net !== 0 ? (
                             w.rankInGroup === 1 ? (
                               <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 font-bold text-[10px]">
                                 🥇 Hạng 1
@@ -1829,7 +1986,9 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         </td>
 
                         <td className="py-3 px-3 text-center font-semibold text-slate-700">
-                          {w.recordsCount > 0 || w.net !== 0 ? (
+                          {w.isHidden ? (
+                            <span className="text-slate-400 font-bold">{MASK_RANK}</span>
+                          ) : w.recordsCount > 0 || w.net !== 0 ? (
                             w.rankInClass <= 3 ? (
                               <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-900 font-bold text-[10px]">
                                 ⭐ #{w.rankInClass}
@@ -1843,7 +2002,11 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         </td>
 
                         <td className="py-3 px-3 text-center">
-                          {w.net >= 5 ? (
+                          {w.isHidden ? (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 inline-flex items-center gap-1">
+                              <Lock className="w-3 h-3" /> Bảo mật
+                            </span>
+                          ) : w.net >= 5 ? (
                             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
                               Xuất sắc
                             </span>
@@ -1863,7 +2026,11 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                         </td>
 
                         <td className="py-3 px-4">
-                          {w.records.length > 0 ? (
+                          {w.isHidden ? (
+                            <span className="text-amber-700 font-semibold text-[11px] inline-flex items-center gap-1">
+                              <Lock className="w-3 h-3" /> Tuần {w.week} đang tạm ẩn
+                            </span>
+                          ) : w.records.length > 0 ? (
                             <div className="flex flex-wrap gap-1.5 max-w-md">
                               {w.records.map((rec) => (
                                 <span
@@ -1913,6 +2080,11 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
             students={students}
             records={records}
             currentWeek={currentWeek}
+            shouldHideScores={shouldHideScores}
+            hiddenMonths2_2={isTeacherOrAdmin ? [] : (selectedClass?.hiddenMonths2_2 || [])}
+            hiddenMonths2_3_2={isTeacherOrAdmin ? [] : (selectedClass?.hiddenMonths2_3_2 || [])}
+            hiddenWeeks2_1={isTeacherOrAdmin ? [] : (selectedClass?.hiddenWeeks2_1 || [])}
+            isTeacherOrAdmin={isTeacherOrAdmin}
           />
 
           {/* ACTIVITY LOG (LỊCH SỬ SỰ VỤ CHI TIẾT CẢ NĂM CỦA HỌC SINH) */}
@@ -1938,11 +2110,15 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
                   className="rounded-xl border border-slate-200 text-xs py-1.5 px-3 bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
                 >
                   <option value="all">Tất cả các tuần (1 – {maxActiveWeek})</option>
-                  {Array.from({ length: maxActiveWeek }, (_, idx) => (
-                    <option key={idx + 1} value={idx + 1}>
-                      Tuần {idx + 1}
-                    </option>
-                  ))}
+                  {Array.from({ length: maxActiveWeek }, (_, idx) => {
+                    const wNum = idx + 1;
+                    if (hiddenWeeksSet.has(wNum)) return null;
+                    return (
+                      <option key={wNum} value={wNum}>
+                        Tuần {wNum}
+                      </option>
+                    );
+                  })}
                 </select>
 
                 <select
@@ -2034,6 +2210,8 @@ export const StudentWeeklyProgressView: React.FC<StudentWeeklyProgressViewProps>
               )}
             </div>
           </div>
+            </>
+          )}
         </div>
       )}
 

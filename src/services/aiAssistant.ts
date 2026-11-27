@@ -6,6 +6,11 @@ import {
   SchoolSystemConfig,
   SchoolClass,
 } from '../types.ts';
+import {
+  getHiddenWeeksSet,
+  isGlobalRankingHidden,
+  MASK_STUDENT_NAME,
+} from '../utils/privacyMasking.ts';
 
 export interface ChatMessage {
   id: string;
@@ -55,12 +60,19 @@ export function buildAuthorizedContext(params: {
 
   const isTeacherOrAdmin =
     currentUser?.role === 'admin' || currentUser?.role === 'gvcn';
-  const shouldAnonymize = systemConfig?.hideRankingScores && !isTeacherOrAdmin;
+  const shouldHideGlobal = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = getHiddenWeeksSet(selectedClass, isTeacherOrAdmin);
+  const visibleRecords = isTeacherOrAdmin
+    ? records
+    : shouldHideGlobal
+    ? []
+    : records.filter((r) => !hiddenWeeksSet.has(r.week));
+  const isCurrentWeekHidden = !isTeacherOrAdmin && hiddenWeeksSet.has(currentWeek);
 
   // Helper to mask name
-  const maskName = (name: string, stt?: number) => {
-    if (!shouldAnonymize) return name;
-    return `Học sinh ${stt || '??'}`;
+  const maskName = (name: string) => {
+    if (!shouldHideGlobal) return name;
+    return MASK_STUDENT_NAME;
   };
 
   // Basic school context available to all (including guests)
@@ -98,6 +110,21 @@ export function buildAuthorizedContext(params: {
   const role = currentUser.role;
   const userClassId = currentUser.classId || selectedClassId || '8A1';
 
+  // Global hide active for non-teacher/admin roles: suppress all student scores, rankings, and point records
+  if (shouldHideGlobal) {
+    return {
+      schoolInfo,
+      rulesSummary,
+      classInfo: {
+        classId: userClassId,
+        className: selectedClass?.name || `Lớp ${userClassId}`,
+        gvcn: selectedClass?.gvcn,
+      },
+      privacyNotice:
+        'Điểm số, bảng xếp hạng và dữ liệu ghi nhận vi phạm/khen thưởng hiện đang được tạm ẩn trên toàn hệ thống theo cấu hình của Admin/GVCN.',
+    };
+  }
+
   // 1. PHHS: Strictly limited to their own child!
   if (role === 'phhs') {
     const student = students.find(
@@ -110,7 +137,7 @@ export function buildAuthorizedContext(params: {
         )
     );
 
-    const studentRecords = records.filter(
+    const studentRecords = visibleRecords.filter(
       (r) =>
         Boolean(currentUser.studentId && r?.studentId === currentUser.studentId) ||
         Boolean(
@@ -120,8 +147,10 @@ export function buildAuthorizedContext(params: {
         )
     );
 
-    // Current week points
-    const currentWeekRecords = studentRecords.filter((r) => r.week === currentWeek);
+    // Current week points (excluded if currentWeek is hidden)
+    const currentWeekRecords = isCurrentWeekHidden
+      ? []
+      : studentRecords.filter((r) => r.week === currentWeek);
     const cwPlus = currentWeekRecords
       .filter((r) => r.type === 'plus')
       .reduce((sum, r) => sum + r.points, 0);
@@ -135,13 +164,12 @@ export function buildAuthorizedContext(params: {
     const totalMinusAll = studentRecords
       .filter((r) => r.type === 'minus')
       .reduce((sum, r) => sum + r.points, 0);
-    const baseScore = student?.baseScore ?? 100;
+    const baseScore = student?.baseScore ?? selectedClass?.baseScore ?? 100;
     const allWeeksTotal = baseScore + totalPlusAll - totalMinusAll;
 
     // Prioritize current week records first so current week data is never missed
-    const currentWeekRecs = studentRecords.filter((r) => r.week === currentWeek);
     const otherRecs = studentRecords.filter((r) => r.week !== currentWeek);
-    const sortedStudentRecords = [...currentWeekRecs, ...otherRecs.reverse()];
+    const sortedStudentRecords = [...currentWeekRecords, ...otherRecs.reverse()];
 
     return {
       schoolInfo,
@@ -151,10 +179,11 @@ export function buildAuthorizedContext(params: {
         className: selectedClass?.name || `Lớp ${userClassId}`,
         gvcn: selectedClass?.gvcn,
       },
+      currentWeekHidden: isCurrentWeekHidden,
       studentInfo: student
         ? {
             id: student.id,
-            name: maskName(student.name, student.stt),
+            name: maskName(student.name),
             group: student.group,
             stt: student.stt,
             gender: student.gender,
@@ -165,13 +194,15 @@ export function buildAuthorizedContext(params: {
             group: currentUser.assignedGroup || 1,
           },
       studentPointsSummary: {
-        currentWeekPoints: {
-          plus: cwPlus,
-          minus: cwMinus,
-          total: baseScore + cwPlus - cwMinus,
-        },
+        currentWeekPoints: isCurrentWeekHidden
+          ? null
+          : {
+              plus: cwPlus,
+              minus: cwMinus,
+              total: baseScore + cwPlus - cwMinus,
+            },
         allWeeksTotal,
-        isWarning: cwMinus >= (systemConfig?.penaltyWarningThreshold || 6),
+        isWarning: !isCurrentWeekHidden && cwMinus >= (systemConfig?.penaltyWarningThreshold || 6),
         recordsCount: studentRecords.length,
       },
       recentRecords: sortedStudentRecords.slice(0, 30).map((r) => ({
@@ -182,22 +213,25 @@ export function buildAuthorizedContext(params: {
         reason: r.reason,
         subject: r.subject,
         dayOfWeek: r.dayOfWeek,
+        studentId: r.studentId,
         studentName: maskName(r.studentName),
       })),
     };
   }
 
-  // 2. TO TRUONG (to1..to4): Can see their group
+  // 2. TO TRUONG (to1..to4): Can see their group (excluding hidden weeks)
   if (role.startsWith('to') && currentUser.assignedGroup) {
     const groupNum = currentUser.assignedGroup;
     const groupStudents = students.filter(
       (s) => (s.classId || '8A1') === userClassId && s.group === groupNum
     );
-    const groupRecords = records.filter(
+    const groupRecords = visibleRecords.filter(
       (r) => (r.classId || '8A1') === userClassId && r.group === groupNum
     );
 
-    const currentWeekRecs = groupRecords.filter((r) => r.week === currentWeek);
+    const currentWeekRecs = isCurrentWeekHidden
+      ? []
+      : groupRecords.filter((r) => r.week === currentWeek);
     const otherRecs = groupRecords.filter((r) => r.week !== currentWeek);
     const sortedGroupRecords = [...currentWeekRecs, ...otherRecs.reverse()];
 
@@ -209,10 +243,11 @@ export function buildAuthorizedContext(params: {
         className: selectedClass?.name || `Lớp ${userClassId}`,
         gvcn: selectedClass?.gvcn,
       },
+      currentWeekHidden: isCurrentWeekHidden,
       groupSummary: {
         groupNumber: groupNum,
         memberCount: groupStudents.length,
-        members: groupStudents.map((s) => ({ id: s.id, name: maskName(s.name, s.stt), stt: s.stt })),
+        members: groupStudents.map((s) => ({ id: s.id, name: maskName(s.name), stt: s.stt })),
         currentWeekRecordsCount: currentWeekRecs.length,
       },
       recentRecords: sortedGroupRecords.slice(0, 30).map((r) => ({
@@ -232,18 +267,22 @@ export function buildAuthorizedContext(params: {
   // 3. GVCN & BAN CAN SU LOP (loptruong, loppho)
   if (role === 'gvcn' || role === 'loptruong' || role === 'loppho') {
     const classStudents = students.filter((s) => (s.classId || '8A1') === userClassId);
-    const classRecords = records.filter((r) => (r.classId || '8A1') === userClassId);
+    const classRecords = visibleRecords.filter((r) => (r.classId || '8A1') === userClassId);
 
-    // Compute student summaries for current week
-    const currentWeekRecords = classRecords.filter((r) => r.week === currentWeek);
-    const warningStudents = classStudents
-      .map((s) => {
-        const sMinus = currentWeekRecords
-          .filter((r) => r.studentId === s.id && r.type === 'minus')
-          .reduce((sum, r) => sum + r.points, 0);
-        return { name: maskName(s.name, s.stt), group: s.group, minusPoints: sMinus };
-      })
-      .filter((s) => s.minusPoints >= (systemConfig?.penaltyWarningThreshold || 6));
+    // Compute student summaries for current week (empty if currentWeek hidden for non-GVCN)
+    const currentWeekRecords = isCurrentWeekHidden
+      ? []
+      : classRecords.filter((r) => r.week === currentWeek);
+    const warningStudents = isCurrentWeekHidden
+      ? []
+      : classStudents
+          .map((s) => {
+            const sMinus = currentWeekRecords
+              .filter((r) => r.studentId === s.id && r.type === 'minus')
+              .reduce((sum, r) => sum + r.points, 0);
+            return { name: maskName(s.name), group: s.group, minusPoints: sMinus };
+          })
+          .filter((s) => s.minusPoints >= (systemConfig?.penaltyWarningThreshold || 6));
 
     const otherRecs = classRecords.filter((r) => r.week !== currentWeek);
     const sortedClassRecords = [...currentWeekRecords, ...otherRecs.reverse()];
@@ -259,6 +298,7 @@ export function buildAuthorizedContext(params: {
         loptruong: selectedClass?.loptruong,
         loppho: selectedClass?.loppho,
       },
+      currentWeekHidden: isCurrentWeekHidden,
       classSummary: {
         totalStudents: classStudents.length,
         currentWeekWarningCount: warningStudents.length,
@@ -333,6 +373,8 @@ interface AuthorizedDataContext {
   studentPointsSummary?: any;
   recentRecords?: any[];
   classRankingSummary?: any[];
+  privacyNotice?: string;
+  currentWeekHidden?: boolean;
 }
 
 /**
@@ -345,12 +387,23 @@ function enforceDataIsolationOnClient(
   const sanitized: AuthorizedDataContext = {
     schoolInfo: data?.schoolInfo,
     rulesSummary: data?.rulesSummary,
+    privacyNotice: data?.privacyNotice,
+    currentWeekHidden: data?.currentWeekHidden,
   };
 
   const role = scope.role || 'guest';
 
   // 1. GUEST: Zero student data or rankings
   if (role === 'guest' || !scope.username) {
+    return {
+      schoolInfo: data?.schoolInfo,
+      rulesSummary: data?.rulesSummary,
+    };
+  }
+
+  // If global privacy lock is active for non-teacher/admin roles, strip all score/record payloads
+  if (data?.privacyNotice && role !== 'admin' && role !== 'gvcn') {
+    sanitized.classInfo = data?.classInfo;
     return sanitized;
   }
 
@@ -360,12 +413,12 @@ function enforceDataIsolationOnClient(
     sanitized.studentInfo = data?.studentInfo;
     sanitized.studentPointsSummary = data?.studentPointsSummary;
 
-    if (data?.recentRecords && scope.studentName) {
-      const targetName = scope.studentName.trim().toLowerCase();
+    if (data?.recentRecords && (scope.studentId || scope.studentName)) {
+      const targetName = scope.studentName?.trim().toLowerCase();
       sanitized.recentRecords = data.recentRecords.filter(
         (r) =>
-          !r?.studentName ||
-          (r.studentName && r.studentName.trim().toLowerCase() === targetName)
+          Boolean(scope.studentId && r?.studentId === scope.studentId) ||
+          Boolean(targetName && r?.studentName && r.studentName.trim().toLowerCase() === targetName)
       );
     }
     return sanitized;
@@ -387,6 +440,7 @@ function enforceDataIsolationOnClient(
   // 4. GVCN, LOP TRUONG, LOP PHO
   if (role === 'gvcn' || role === 'loptruong' || role === 'loppho') {
     sanitized.classInfo = data?.classInfo;
+    sanitized.classSummary = data?.classSummary;
     sanitized.groupSummary = data?.groupSummary;
     sanitized.classRankingSummary = data?.classRankingSummary;
     sanitized.recentRecords = data?.recentRecords;
@@ -467,6 +521,10 @@ function synthesizeClientResponse(
       q.includes('lỗi') ||
       q.includes('tình hình')
     ) {
+      if (safeData.privacyNotice) {
+        return `🔒 **Thông tin điểm thi đua đang được tạm ẩn:**\n\n${safeData.privacyNotice}`;
+      }
+
       const summary = safeData.studentPointsSummary;
       const cw = summary?.currentWeekPoints;
       const recent = safeData.recentRecords || [];
@@ -475,7 +533,9 @@ function synthesizeClientResponse(
         scope.classId || '8A1'
       }) đây ạ:\n\n`;
 
-      if (cw) {
+      if (safeData.currentWeekHidden) {
+        res += `🔒 **Tuần ${safeData.schoolInfo?.currentWeek || ''}:** Điểm số tuần này hiện đang được tạm ẩn theo cấu hình của lớp.\n\n`;
+      } else if (cw) {
         res += `📌 **Tình hình thi đua Tuần ${safeData.schoolInfo?.currentWeek || ''}:**\n`;
         res += `  • Điểm thưởng cộng thêm: **+${cw.plus} điểm** ⭐\n`;
         res += `  • Điểm trừ vi phạm: **-${cw.minus} điểm**\n`;
@@ -497,7 +557,7 @@ function synthesizeClientResponse(
             r.dayOfWeek ? `(${r.dayOfWeek})` : ''
           }\n`;
         });
-      } else {
+      } else if (!safeData.currentWeekHidden) {
         res += `🎉 Hiện tại con chưa bị ghi nhận bất kỳ lỗi vi phạm trừ điểm nào gần đây. Tuyệt vời lắm ạ!`;
       }
 
@@ -571,6 +631,12 @@ function synthesizeClientResponse(
 
   // 5. GVCN & BAN CAN SU QUERIES
   if (role === 'gvcn' || role === 'loptruong' || role === 'loppho' || role === 'admin') {
+    if (safeData.privacyNotice && role !== 'gvcn' && role !== 'admin') {
+      return `🔒 **Thông tin điểm thi đua đang được tạm ẩn:**\n\n${safeData.privacyNotice}`;
+    }
+    if (safeData.currentWeekHidden && role !== 'gvcn' && role !== 'admin') {
+      return `🔒 **Tuần ${safeData.schoolInfo?.currentWeek || ''} đang được tạm ẩn:**\n\nDữ liệu điểm thi đua và cảnh báo của tuần này hiện đang được bảo mật theo cấu hình lớp.`;
+    }
     const cls = safeData.classSummary;
     let res = `Em gửi Thầy/Cô báo cáo thi đua tổng hợp Lớp ${scope.classId || '8A1'} tuần này ạ:\n\n`;
     res += `📊 **Tổng quan tình hình:**\n`;

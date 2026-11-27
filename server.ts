@@ -9,7 +9,9 @@ dotenv.config();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 function getServerGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey =
+    process.env.GEMINI_API_KEY?.trim() ||
+    process.env.VITE_GEMINI_API_KEY?.trim();
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
@@ -85,6 +87,7 @@ interface AuthorizedDataContext {
     reason: string;
     subject?: string;
     dayOfWeek?: string;
+    studentId?: string;
     studentName?: string;
     group?: number;
   }>;
@@ -94,6 +97,8 @@ interface AuthorizedDataContext {
     totalScore: number;
     rank: number;
   }>;
+  privacyNotice?: string;
+  currentWeekHidden?: boolean;
 }
 
 /**
@@ -120,19 +125,30 @@ function enforceDataIsolation(
     return sanitized;
   }
 
+  // Global hide active for non-teacher/admin roles
+  if (data?.privacyNotice && role !== 'admin' && role !== 'gvcn') {
+    return {
+      schoolInfo: data?.schoolInfo,
+      rulesSummary: data?.rulesSummary,
+      classInfo: data?.classInfo,
+      privacyNotice: data.privacyNotice,
+    };
+  }
+
   // 2. PHHS (Phụ huynh học sinh): Strictly their own child
   if (role === 'phhs') {
     sanitized.classInfo = data?.classInfo;
     sanitized.studentInfo = data?.studentInfo;
     sanitized.studentPointsSummary = data?.studentPointsSummary;
+    sanitized.currentWeekHidden = data?.currentWeekHidden;
 
-    // Filter records: MUST only be for this student
-    if (data?.recentRecords && scope.studentName) {
-      const targetName = scope.studentName.trim().toLowerCase();
+    // Filter records: MUST only match this student explicitly
+    if (data?.recentRecords && (scope.studentId || scope.studentName)) {
+      const targetName = scope.studentName?.trim().toLowerCase();
       sanitized.recentRecords = data.recentRecords.filter(
         (r) =>
-          !r?.studentName ||
-          (r.studentName && r.studentName.trim().toLowerCase() === targetName)
+          Boolean(scope.studentId && r?.studentId === scope.studentId) ||
+          Boolean(targetName && r?.studentName && r.studentName.trim().toLowerCase() === targetName)
       );
     }
     // PHHS cannot see other students' ranking details, only generalized class rule context
@@ -143,6 +159,7 @@ function enforceDataIsolation(
   if (role.startsWith('to') && scope.assignedGroup) {
     sanitized.classInfo = data?.classInfo;
     sanitized.groupSummary = data?.groupSummary;
+    sanitized.currentWeekHidden = data?.currentWeekHidden;
     if (data?.recentRecords) {
       sanitized.recentRecords = data.recentRecords.filter(
         (r) => r.group === scope.assignedGroup
@@ -155,9 +172,11 @@ function enforceDataIsolation(
   // 4. GVCN, LOP TRUONG, LOP PHO: In charge of the entire class
   if (role === 'gvcn' || role === 'loptruong' || role === 'loppho') {
     sanitized.classInfo = data?.classInfo;
+    sanitized.classSummary = data?.classSummary;
     sanitized.groupSummary = data?.groupSummary;
     sanitized.classRankingSummary = data?.classRankingSummary;
     sanitized.recentRecords = data?.recentRecords;
+    sanitized.currentWeekHidden = data?.currentWeekHidden;
     return sanitized;
   }
 
@@ -199,6 +218,24 @@ function synthesizeLocalResponse(
     }
   }
 
+  // 1B. GLOBAL PRIVACY NOTICE ENFORCEMENT
+  if (
+    safeData.privacyNotice &&
+    role !== 'admin' &&
+    role !== 'gvcn' &&
+    (q.includes('điểm') ||
+      q.includes('xếp hạng') ||
+      q.includes('thứ hạng') ||
+      q.includes('bị trừ') ||
+      q.includes('được cộng') ||
+      q.includes('tình hình') ||
+      q.includes('học sinh') ||
+      q.includes('cảnh báo') ||
+      q.includes('con'))
+  ) {
+    return `🔒 **Chế độ Bảo mật Điểm số:**\n\n${safeData.privacyNotice}`;
+  }
+
   // 2. PHHS PERMISSION ENFORCEMENT & CHILD QUERY
   if (role === 'phhs') {
     const studentName = scope.studentName || 'con';
@@ -225,7 +262,9 @@ function synthesizeLocalResponse(
       const recent = safeData.recentRecords || [];
 
       let res = `### 📊 Tình hình nề nếp của em **${studentName}** (Lớp ${scope.classId || '8A1'}):\n\n`;
-      if (cw) {
+      if (safeData.currentWeekHidden) {
+        res += `- 🔒 **Tuần ${safeData.schoolInfo?.currentWeek || ''}:** Điểm chi tiết tuần này hiện đang được GVCN tạm ẩn theo cấu hình lớp.\n\n`;
+      } else if (cw) {
         res += `- **Điểm tuần này (Tuần ${safeData.schoolInfo?.currentWeek || ''}):**\n`;
         res += `  • Điểm cộng thưởng: **+${cw.plus} điểm**\n`;
         res += `  • Điểm trừ vi phạm: **-${cw.minus} điểm**\n`;
@@ -241,7 +280,7 @@ function synthesizeLocalResponse(
       }
 
       if (recent.length > 0) {
-        res += `**Chi tiết các bản ghi gần đây của con:**\n`;
+        res += `**Chi tiết các bản ghi công khai gần đây của con:**\n`;
         recent.slice(0, 5).forEach((r) => {
           res += `- **Tuần ${r.week}** [${r.type === 'plus' ? 'Cộng' : 'Trừ'} ${r.points}đ]: ${
             r.ruleTitle
@@ -250,7 +289,7 @@ function synthesizeLocalResponse(
           }\n`;
         });
       } else {
-        res += `Hiện tại con chưa có bản ghi trừ điểm nào được ghi nhận gần đây.`;
+        res += `Hiện tại chưa có bản ghi công khai nào khác được ghi nhận gần đây.`;
       }
 
       return res;
@@ -332,9 +371,16 @@ function synthesizeLocalResponse(
 
   // 5. GVCN & BAN CAN SU QUERIES
   if (role === 'gvcn' || role === 'loptruong' || role === 'loppho' || role === 'admin') {
+    if (safeData.privacyNotice && role !== 'gvcn' && role !== 'admin') {
+      return `🔒 **Chế độ Bảo mật Điểm số:**\n\n${safeData.privacyNotice}`;
+    }
     const cls = safeData.classSummary;
     let res = `### 📋 Báo cáo tổng hợp nề nếp Lớp ${scope.classId || '8A1'}:\n\n`;
     res += `- **Sĩ số:** ${cls?.totalStudents || 0} học sinh\n`;
+    if (safeData.currentWeekHidden && role !== 'gvcn' && role !== 'admin') {
+      res += `- 🔒 **Tuần ${safeData.schoolInfo?.currentWeek || ''}:** Số liệu chi tiết tuần này hiện đang được GVCN tạm ẩn.\n`;
+      return res;
+    }
     res += `- **Số học sinh bị cảnh báo Tuần ${safeData.schoolInfo?.currentWeek || ''} (>6đ trừ):** **${
       cls?.currentWeekWarningCount || 0
     } em**\n`;
@@ -377,6 +423,15 @@ function pruneContextForQuery(
     };
   }
 
+  if (safeData.privacyNotice && role !== 'admin' && role !== 'gvcn') {
+    return {
+      schoolInfo: safeData.schoolInfo,
+      rulesSummary: safeData.rulesSummary,
+      classInfo: safeData.classInfo,
+      privacyNotice: safeData.privacyNotice,
+    };
+  }
+
   const isRuleQuery =
     q.includes('muộn') ||
     q.includes('trễ') ||
@@ -407,6 +462,8 @@ function pruneContextForQuery(
       rulesSummary: safeData.rulesSummary,
       classInfo: safeData.classInfo,
       studentInfo: safeData.studentInfo,
+      privacyNotice: safeData.privacyNotice,
+      currentWeekHidden: safeData.currentWeekHidden,
     };
   }
 
@@ -418,6 +475,8 @@ function pruneContextForQuery(
     studentPointsSummary: safeData.studentPointsSummary,
     groupSummary: safeData.groupSummary,
     classSummary: safeData.classSummary,
+    privacyNotice: safeData.privacyNotice,
+    currentWeekHidden: safeData.currentWeekHidden,
   };
 
   // Include recent records (up to 30), prioritizing current week records
@@ -569,7 +628,7 @@ Hãy phản hồi DUY NHẤT dưới dạng JSON theo cấu trúc:
         console.warn('Gemini OCR generation error, applying fallback:', genAiErr);
       }
     } else {
-      console.warn('GEMINI_API_KEY environment variable is not configured for /api/ocr-document.');
+      console.warn('Neither GEMINI_API_KEY nor VITE_GEMINI_API_KEY is configured for /api/ocr-document.');
     }
 
     if (!ocrResult) {
@@ -635,6 +694,12 @@ app.post('/api/ai-assistant', async (req: Request, res: Response) => {
       permissionScopeText = `QUYỀN RIÊNG TƯ TUYỆT ĐỐI: Đây là Phụ huynh của em "${scope.studentName || ''}" (ID: ${scope.studentId || ''}). PHỤ HUYNH CHỈ ĐƯỢC XEM DỮ LIỆU ĐIỂM, LỖI VI PHẠM, THƯỞNG VÀ XẾP HẠNG CỦA CON MÌNH (${scope.studentName}). TUYỆT ĐỐI KHÔNG tiết lộ điểm số hay lỗi vi phạm của bất kỳ học sinh nào khác. Nếu phụ huynh hỏi về học sinh khác, hãy lịch sự từ chối vì lý do bảo mật và bảo vệ quyền riêng tư học đường.`;
     }
 
+    const privacyRuleNote = safeData.privacyNotice
+      ? `\n- CHÚ Ý BẢO MẬT: ${safeData.privacyNotice} TUYỆT ĐỐI KHÔNG suy đoán hoặc bịa đặt điểm số hay xếp hạng.`
+      : safeData.currentWeekHidden
+      ? `\n- CHÚ Ý BẢO MẬT: Dữ liệu Tuần ${safeData.schoolInfo?.currentWeek || ''} hiện đang tạm ẩn, không được trả lời hay suy đoán điểm tuần này.`
+      : '';
+
     const systemInstruction = `Bạn là Trợ lý AI Thông minh của Hệ thống Quản lý Nền nếp & Thi đua Học đường Trường THCS Nguyễn Đăng Đạo.
 
 PONG CÁCH GIAO TIẾP (RẤT QUAN TRỌNG):
@@ -646,7 +711,7 @@ PONG CÁCH GIAO TIẾP (RẤT QUAN TRỌNG):
 
 QUY TẮC BẢO MẬT & PHÂN QUYỀN (RẤT QUAN TRỌNG):
 - Người dùng hiện tại: ${roleDescription}
-- Phạm vi phân quyền: ${permissionScopeText}
+- Phạm vi phân quyền: ${permissionScopeText}${privacyRuleNote}
 - Dữ liệu có sẵn cho phiên làm việc này:
 ${JSON.stringify(prunedData, null, 2)}`;
 

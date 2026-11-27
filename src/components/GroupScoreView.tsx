@@ -23,6 +23,14 @@ import { StudentWeeklyProgressModal } from './StudentWeeklyProgressModal.tsx';
 import { CreateScoreReportModal } from './CreateScoreReportModal.tsx';
 import { RequestSupplementalScoreModal } from './RequestSupplementalScoreModal.tsx';
 import {
+  MASK_SCORE,
+  MASK_RANK,
+  MASK_STUDENT_NAME,
+  isGlobalRankingHidden,
+  isWeekHiddenForUser,
+  isMyChildStudent,
+} from '../utils/privacyMasking.ts';
+import {
   Plus,
   Minus,
   Award,
@@ -91,8 +99,9 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   
   const isCanManageThisGroup = Boolean(currentUser && canManageGroup(groupNumber));
-  const isWeekHidden = Boolean(selectedClass?.hiddenWeeks2_1?.includes(currentWeek));
-  const shouldHideScores = (systemConfig?.hideRankingScores || isWeekHidden) && !isCanManageThisGroup;
+  const isWeekHidden = isWeekHiddenForUser(currentWeek, selectedClass, isTeacherOrAdmin);
+  const shouldHideScores = (isGlobalRankingHidden(systemConfig, isTeacherOrAdmin) || isWeekHidden) && !isCanManageThisGroup;
+  const shouldHideCrossWeekModal = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin) || (isWeekHidden && !isCanManageThisGroup);
   const [targetStudentForAdd, setTargetStudentForAdd] = useState<Student | null>(null);
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -160,12 +169,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
   );
 
   const isPhhs = currentUser?.role === 'phhs';
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (currentUser.studentName && stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()) return true;
-    return false;
-  };
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
 
   // Filter students for this group - luôn sắp xếp chuẩn theo thứ tự ABC
   const groupStudents = useMemo(() => {
@@ -243,19 +247,23 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
     let list = studentRows;
     if (searchTerm.trim()) {
       const q = searchTerm.toLowerCase();
-      list = list.filter(
-        (r) =>
+      list = list.filter((r) => {
+        if (shouldHideScores || (isPhhs && !isMyChild(r.student))) {
+          return false;
+        }
+        return (
           (r.student?.name || '').toLowerCase().includes(q) ||
           (r.student?.roleInGroup && r.student.roleInGroup.toLowerCase().includes(q))
-      );
+        );
+      });
     }
-    if (tableSortMode === 'rank') {
+    if (tableSortMode === 'rank' && !shouldHideScores && !isPhhs) {
       return [...list].sort((a, b) => b.totalScore - a.totalScore);
     }
     // Mặc định: Sắp xếp chuẩn theo thứ tự ABC danh sách lớp
     const sortedStudents = sortStudentsByABC(list.map((r) => r.student).filter(Boolean));
     return sortedStudents.map((s) => list.find((r) => r.student?.id === s.id)).filter(Boolean) as typeof list;
-  }, [studentRows, searchTerm, tableSortMode]);
+  }, [studentRows, searchTerm, tableSortMode, shouldHideScores, isPhhs, currentUser]);
 
   const handleOpenAddPoint = (student: Student) => {
     setTargetStudentForAdd(student);
@@ -263,11 +271,15 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
   };
 
   const handleOpenHistory = (student: Student | null) => {
+    if (shouldHideScores) return;
+    if (isPhhs && (!student || !isMyChild(student))) return;
     setTargetStudentForHistory(student);
     setIsHistoryModalOpen(true);
   };
 
   const handleOpenProgress = (student: Student) => {
+    if (shouldHideScores) return;
+    if (isPhhs && !isMyChild(student)) return;
     setTargetStudentForProgress(student);
     setIsProgressModalOpen(true);
   };
@@ -296,9 +308,9 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
           </p>
           <div className="mt-2 text-xs font-semibold text-slate-800 flex justify-center gap-6">
             <span>Sĩ số tổ: <b>{groupStudents.length} HS</b></span>
-            <span>Tổng điểm thưởng (+): <b>+{studentRows.reduce((s, r) => s + r.totalPlus, 0)}</b></span>
-            <span>Tổng điểm phạt (-): <b>-{studentRows.reduce((s, r) => s + r.totalMinus, 0)}</b></span>
-            <span>ĐTB Tổ: <b>{(studentRows.reduce((s, r) => s + r.totalScore, 0) / (groupStudents.length || 1)).toFixed(2)} đ</b></span>
+            <span>Tổng điểm thưởng (+): <b>{shouldHideScores || isPhhs ? MASK_SCORE : `+${studentRows.reduce((s, r) => s + r.totalPlus, 0)}`}</b></span>
+            <span>Tổng điểm phạt (-): <b>{shouldHideScores || isPhhs ? MASK_SCORE : `-${studentRows.reduce((s, r) => s + r.totalMinus, 0)}`}</b></span>
+            <span>ĐTB Tổ: <b>{shouldHideScores || isPhhs ? MASK_SCORE : `${(studentRows.reduce((s, r) => s + r.totalScore, 0) / (groupStudents.length || 1)).toFixed(2)} đ`}</b></span>
           </div>
         </div>
       </div>
@@ -376,23 +388,27 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
               Xem Khung điểm PDF
             </button>
 
-            <button
-              onClick={() => handleOpenHistory(null)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-            >
-              <History className="w-3.5 h-3.5 text-slate-600" />
-              Lịch sử điểm cả tổ
-            </button>
+            {!shouldHideScores && !isPhhs && (
+              <>
+                <button
+                  onClick={() => handleOpenHistory(null)}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+                >
+                  <History className="w-3.5 h-3.5 text-slate-600" />
+                  Lịch sử điểm cả tổ
+                </button>
 
-            {/* In sổ điểm Tổ */}
-            <button
-              onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-              title="In sổ điểm và bảng tổng hợp thi đua Tổ"
-            >
-              <Printer className="w-3.5 h-3.5 text-slate-600" />
-              <span>In sổ điểm Tổ</span>
-            </button>
+                {/* In sổ điểm Tổ */}
+                <button
+                  onClick={() => window.print()}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+                  title="In sổ điểm và bảng tổng hợp thi đua Tổ"
+                >
+                  <Printer className="w-3.5 h-3.5 text-slate-600" />
+                  <span>In sổ điểm Tổ</span>
+                </button>
+              </>
+            )}
 
             {!currentUser ? (
               <button
@@ -728,15 +744,15 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
 
           <div className="bg-emerald-50/50 p-3 rounded-xl border border-emerald-100">
             <span className="text-[11px] font-medium text-emerald-700 block">Tổng Điểm Cộng</span>
-            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-emerald-600'}`}>
-              {shouldHideScores ? '???' : `+${groupStats.totalPlus} đ`}
+            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-400' : 'text-emerald-600'}`}>
+              {shouldHideScores ? MASK_SCORE : `+${groupStats.totalPlus} đ`}
             </span>
           </div>
 
           <div className="bg-rose-50/50 p-3 rounded-xl border border-rose-100">
             <span className="text-[11px] font-medium text-rose-700 block">Tổng Điểm Trừ</span>
-            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-rose-600'}`}>
-              {shouldHideScores ? '???' : `-${groupStats.totalMinus} đ`}
+            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-400' : 'text-rose-600'}`}>
+              {shouldHideScores ? MASK_SCORE : `-${groupStats.totalMinus} đ`}
             </span>
           </div>
 
@@ -744,24 +760,24 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
             <span className="text-[11px] font-medium text-blue-700 block">Tổng điểm tổ</span>
             <span
               className={`text-lg font-black ${
-                shouldHideScores ? 'text-slate-300 blur-xs' : (groupStats.totalScore >= 0 ? 'text-blue-700' : 'text-rose-600')
+                shouldHideScores ? 'text-slate-400' : (groupStats.totalScore >= 0 ? 'text-blue-700' : 'text-rose-600')
               }`}
             >
-              {shouldHideScores ? '???' : (groupStats.totalScore >= 0 ? `+${groupStats.totalScore}` : groupStats.totalScore)} {shouldHideScores ? '' : 'đ'}
+              {shouldHideScores ? MASK_SCORE : `${groupStats.totalScore >= 0 ? `+${groupStats.totalScore}` : groupStats.totalScore} đ`}
             </span>
           </div>
 
           <div className="bg-indigo-50/50 p-3 rounded-xl border border-indigo-100">
             <span className="text-[11px] font-medium text-indigo-700 block">Điểm trung bình (ĐTB)</span>
-            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-indigo-700'}`}>
-              {shouldHideScores ? '???' : groupStats.averageScore} <span className="text-xs font-normal text-slate-500">{shouldHideScores ? '' : 'đ/HS'}</span>
+            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-400' : 'text-indigo-700'}`}>
+              {shouldHideScores ? MASK_SCORE : groupStats.averageScore} <span className="text-xs font-normal text-slate-500">{shouldHideScores ? '' : 'đ/HS'}</span>
             </span>
           </div>
 
           <div className="bg-amber-50/50 p-3 rounded-xl border border-amber-100">
             <span className="text-[11px] font-medium text-amber-700 block">Hạng thi đua lớp</span>
-            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-amber-700'} flex items-center gap-1`}>
-              <Award className="w-4 h-4 text-amber-500" /> {shouldHideScores ? '???' : `Hạng ${groupStats.currentRank}`}
+            <span className={`text-lg font-black ${shouldHideScores ? 'text-slate-400' : 'text-amber-700'} flex items-center gap-1`}>
+              <Award className="w-4 h-4 text-amber-500" /> {shouldHideScores ? MASK_RANK : `Hạng ${groupStats.currentRank}`}
             </span>
           </div>
         </div>
@@ -782,7 +798,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                 type="button"
                 onClick={() => setTableSortMode('abc')}
                 className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
-                  tableSortMode === 'abc'
+                  tableSortMode === 'abc' || shouldHideScores || isPhhs
                     ? 'bg-white text-blue-700 shadow-xs'
                     : 'text-slate-500 hover:text-slate-800'
                 }`}
@@ -790,18 +806,20 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
               >
                 Xếp ABC (Mặc định)
               </button>
-              <button
-                type="button"
-                onClick={() => setTableSortMode('rank')}
-                className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
-                  tableSortMode === 'rank'
-                    ? 'bg-white text-blue-700 shadow-xs'
-                    : 'text-slate-500 hover:text-slate-800'
-                }`}
-                title="Sắp xếp theo Xếp hạng điểm thi đua trong tổ"
-              >
-                Theo Hạng điểm
-              </button>
+              {!shouldHideScores && !isPhhs && (
+                <button
+                  type="button"
+                  onClick={() => setTableSortMode('rank')}
+                  className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+                    tableSortMode === 'rank'
+                      ? 'bg-white text-blue-700 shadow-xs'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                  title="Sắp xếp theo Xếp hạng điểm thi đua trong tổ"
+                >
+                  Theo Hạng điểm
+                </button>
+              )}
             </div>
           </div>
 
@@ -837,6 +855,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
               {filteredStudentRows.map((row, index) => {
                 const myChild = isMyChild(row.student);
                 const hideForOtherPhhs = isPhhs && !myChild;
+                const hideRowSensitive = shouldHideScores || hideForOtherPhhs;
 
                 return (
                   <tr
@@ -844,7 +863,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                     className={`transition ${
                       myChild
                         ? 'bg-emerald-50/80 dark:bg-emerald-950/40 border-l-4 border-l-emerald-500 hover:bg-emerald-100/60'
-                        : row.isPenaltyWarning && !hideForOtherPhhs
+                        : row.isPenaltyWarning && !hideRowSensitive
                         ? 'bg-rose-50/30 hover:bg-slate-50/70'
                         : 'hover:bg-slate-50/70'
                     }`}
@@ -853,9 +872,11 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                     <td className="py-3.5 px-4 text-center font-bold text-slate-500">
                       <div className="flex flex-col items-center">
                         <span className="font-black text-slate-800">{index + 1}</span>
-                        <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1 rounded mt-0.5" title={`STT toàn lớp: #${getStudentCanonicalSTT(row.student)}`}>
-                          #{getStudentCanonicalSTT(row.student)}
-                        </span>
+                        {!hideRowSensitive && (
+                          <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1 rounded mt-0.5" title={`STT toàn lớp: #${getStudentCanonicalSTT(row.student)}`}>
+                            #{getStudentCanonicalSTT(row.student)}
+                          </span>
+                        )}
                       </div>
                     </td>
 
@@ -864,9 +885,9 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                       <div className="flex items-center gap-2">
                         <div>
                           <div className="font-bold text-slate-800 flex items-center gap-1.5 flex-wrap">
-                            {hideForOtherPhhs ? (
-                              <span className="text-left font-bold text-slate-700 dark:text-slate-300">
-                                {row.student.name}
+                            {hideRowSensitive ? (
+                              <span className="text-left font-bold text-slate-400">
+                                {MASK_STUDENT_NAME}
                               </span>
                             ) : (
                               <button
@@ -874,7 +895,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                                 className="text-left font-bold text-slate-800 hover:text-blue-600 hover:underline transition cursor-pointer"
                                 title="Bấm để xem biểu đồ và lịch sử thi đua của bạn này qua các tuần"
                               >
-                                {shouldHideScores ? `Học sinh ${getStudentCanonicalSTT(row.student)}` : row.student.name}
+                                {row.student.name}
                               </button>
                             )}
 
@@ -884,28 +905,26 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                               </span>
                             )}
 
-                            {row.student.roleInGroup && row.student.roleInGroup !== 'Thành viên' && (
+                            {!hideRowSensitive && row.student.roleInGroup && row.student.roleInGroup !== 'Thành viên' && (
                               <span
                                 className={`text-[10px] font-bold px-1.5 py-0.2 rounded border ${
-                                  shouldHideScores 
-                                    ? 'bg-slate-100 text-slate-400 border-slate-200'
-                                    : (row.student.roleInGroup.includes('Lớp trưởng')
-                                      ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300'
-                                      : row.student.roleInGroup.includes('Tổ trưởng')
-                                      ? 'bg-blue-100 dark:bg-blue-950/60 text-blue-800 dark:text-blue-300 border-blue-200'
-                                      : row.student.roleInGroup.includes('Lớp phó')
-                                      ? 'bg-indigo-100 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border-indigo-200'
-                                      : row.student.roleInGroup.includes('Sao đỏ')
-                                      ? 'bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 border-rose-200'
-                                      : row.student.roleInGroup.includes('CNTT')
-                                      ? 'bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 border-purple-200'
-                                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200')
+                                  row.student.roleInGroup.includes('Lớp trưởng')
+                                    ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300'
+                                    : row.student.roleInGroup.includes('Tổ trưởng')
+                                    ? 'bg-blue-100 dark:bg-blue-950/60 text-blue-800 dark:text-blue-300 border-blue-200'
+                                    : row.student.roleInGroup.includes('Lớp phó')
+                                    ? 'bg-indigo-100 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border-indigo-200'
+                                    : row.student.roleInGroup.includes('Sao đỏ')
+                                    ? 'bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 border-rose-200'
+                                    : row.student.roleInGroup.includes('CNTT')
+                                    ? 'bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 border-purple-200'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200'
                                 }`}
                               >
-                                {shouldHideScores ? 'Cán sự' : row.student.roleInGroup}
+                                {row.student.roleInGroup}
                               </span>
                             )}
-                            {!hideForOtherPhhs && row.schoolPenalties && row.schoolPenalties.length > 0 && (
+                            {!hideRowSensitive && row.schoolPenalties && row.schoolPenalties.length > 0 && (
                               <div className="mt-1 flex flex-wrap gap-1">
                                 {row.schoolPenalties.map((sp) => (
                                   <span
@@ -926,38 +945,36 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
 
                     {/* Cột: Điểm gốc */}
                     <td className="py-3.5 px-4 text-center">
-                      {hideForOtherPhhs ? (
+                      {hideRowSensitive ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs" title="Bảo mật thông tin cá nhân">
-                          <Lock className="w-3 h-3 text-slate-400" /> ***
+                          <Lock className="w-3 h-3 text-slate-400" /> {MASK_SCORE}
                         </span>
                       ) : (
-                        <span className={`inline-block px-2.5 py-1 rounded-lg ${shouldHideScores ? 'text-slate-300 blur-xs bg-slate-50' : 'bg-indigo-50 text-indigo-700 border border-indigo-100'} font-bold text-xs`}>
-                          {shouldHideScores ? '???' : (currentWeek >= (row.student.startWeek || 1) 
+                        <span className="inline-block px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-100 font-bold text-xs">
+                          {currentWeek >= (row.student.startWeek || 1)
                             ? (row.student.baseScore ?? selectedClass?.baseScore ?? 100)
-                            : 0)}
+                            : 0}
                         </span>
                       )}
                     </td>
 
                     {/* Cột 3: Điểm cộng */}
                     <td className="py-3.5 px-4 text-center">
-                      {hideForOtherPhhs ? (
+                      {hideRowSensitive ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs" title="Bảo mật thông tin cá nhân">
-                          <Lock className="w-3 h-3 text-slate-400" /> ***
+                          <Lock className="w-3 h-3 text-slate-400" /> {MASK_SCORE}
                         </span>
                       ) : row.totalPlus > 0 ? (
                         <button
                           onClick={() => handleOpenHistory(row.student)}
                           title="Bấm xem chi tiết các lần cộng điểm"
-                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg ${shouldHideScores ? 'text-slate-300 blur-xs bg-slate-50 border-slate-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'} font-bold transition cursor-pointer`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 font-bold transition cursor-pointer"
                         >
-                          {shouldHideScores ? null : <Plus className="w-3 h-3" />}
-                          <span>{shouldHideScores ? '???' : `+${row.totalPlus}`}</span>
-                          {!shouldHideScores && (
-                            <span className="text-[10px] font-normal text-emerald-600">
-                              ({row.plusCount} lần)
-                            </span>
-                          )}
+                          <Plus className="w-3 h-3" />
+                          <span>{`+${row.totalPlus}`}</span>
+                          <span className="text-[10px] font-normal text-emerald-600">
+                            ({row.plusCount} lần)
+                          </span>
                         </button>
                       ) : (
                         <span className="text-slate-300 font-medium">—</span>
@@ -966,26 +983,24 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
 
                     {/* Cột 4: Điểm trừ */}
                     <td className="py-3.5 px-4 text-center">
-                      {hideForOtherPhhs ? (
+                      {hideRowSensitive ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs" title="Bảo mật thông tin cá nhân">
-                          <Lock className="w-3 h-3 text-slate-400" /> ***
+                          <Lock className="w-3 h-3 text-slate-400" /> {MASK_SCORE}
                         </span>
                       ) : row.totalMinus > 0 ? (
                         <div className="inline-flex flex-col items-center">
                           <button
                             onClick={() => handleOpenHistory(row.student)}
                             title="Bấm xem chi tiết các lần trừ điểm"
-                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg ${shouldHideScores ? 'text-slate-300 blur-xs bg-slate-50 border-slate-100' : 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'} font-bold transition cursor-pointer`}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 font-bold transition cursor-pointer"
                           >
-                            {shouldHideScores ? null : <Minus className="w-3 h-3" />}
-                            <span>{shouldHideScores ? '???' : `-${row.totalMinus}`}</span>
-                            {!shouldHideScores && (
-                              <span className="text-[10px] font-normal text-rose-600">
-                                ({row.minusCount} lần)
-                              </span>
-                            )}
+                            <Minus className="w-3 h-3" />
+                            <span>{`-${row.totalMinus}`}</span>
+                            <span className="text-[10px] font-normal text-rose-600">
+                              ({row.minusCount} lần)
+                            </span>
                           </button>
-                          {!shouldHideScores && row.schoolPenalties && row.schoolPenalties.length > 0 && (
+                          {row.schoolPenalties && row.schoolPenalties.length > 0 && (
                             <span
                               className="text-[10px] font-bold text-purple-800 bg-purple-100 dark:bg-purple-950/60 px-1.5 py-0.5 rounded mt-1 border border-purple-200 block text-center max-w-[140px] truncate"
                               title={row.schoolPenalties.map((p) => p.faultOrReward || p.ruleTitle).join(' • ')}
@@ -993,7 +1008,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
                               Lỗi trường: {row.schoolPenalties[0].faultOrReward || row.schoolPenalties[0].ruleTitle}
                             </span>
                           )}
-                          {!shouldHideScores && row.isPenaltyWarning && (
+                          {row.isPenaltyWarning && (
                             <span className="text-[10px] font-bold text-rose-600 bg-rose-100 px-1.5 py-0.5 rounded mt-1 flex items-center gap-0.5">
                               <AlertTriangle className="w-2.5 h-2.5" /> Chép phạt (&gt;6đ)
                             </span>
@@ -1006,68 +1021,58 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
 
                     {/* Cột 5: Tổng điểm */}
                     <td className="py-3.5 px-4 text-center">
-                      {hideForOtherPhhs ? (
+                      {hideRowSensitive ? (
                         <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs" title="Bảo mật thông tin cá nhân">
-                          <Lock className="w-3 h-3 text-slate-400" /> ***
+                          <Lock className="w-3 h-3 text-slate-400" /> {MASK_SCORE}
                         </span>
                       ) : (
                         <div className="flex flex-col items-center">
                           <span
                             className={`inline-block px-3 py-1 rounded-xl font-black text-xs ${
-                              shouldHideScores 
-                                ? 'bg-slate-100 text-slate-300 blur-xs'
-                                : (row.totalScore >= 100
-                                  ? 'bg-emerald-100/80 text-emerald-800'
-                                  : row.totalScore >= 80
-                                  ? 'bg-blue-100/80 text-blue-800'
-                                  : 'bg-rose-100/80 text-rose-800')
+                              row.totalScore >= 100
+                                ? 'bg-emerald-100/80 text-emerald-800'
+                                : row.totalScore >= 80
+                                ? 'bg-blue-100/80 text-blue-800'
+                                : 'bg-rose-100/80 text-rose-800'
                             }`}
                           >
-                            {shouldHideScores ? '???' : row.totalScore}
+                            {row.totalScore}
                           </span>
-                          {!shouldHideScores && (
-                            <span
-                              className="text-[10px] text-slate-400 font-medium mt-0.5"
-                              title={`Điểm gốc: ${row.student.baseScore ?? selectedClass?.baseScore ?? 100} | Cộng: +${row.totalPlus} | Trừ: -${row.totalMinus}`}
-                            >
-                              {currentWeek >= (row.student.startWeek || 1) ? (row.student.baseScore ?? selectedClass?.baseScore ?? 100) : 0} {row.totalPlus > 0 ? `+ ${row.totalPlus}` : ''} {row.totalMinus > 0 ? `- ${row.totalMinus}` : ''}
-                            </span>
-                          )}
+                          <span
+                            className="text-[10px] text-slate-400 font-medium mt-0.5"
+                            title={`Điểm gốc: ${row.student.baseScore ?? selectedClass?.baseScore ?? 100} | Cộng: +${row.totalPlus} | Trừ: -${row.totalMinus}`}
+                          >
+                            {currentWeek >= (row.student.startWeek || 1) ? (row.student.baseScore ?? selectedClass?.baseScore ?? 100) : 0} {row.totalPlus > 0 ? `+ ${row.totalPlus}` : ''} {row.totalMinus > 0 ? `- ${row.totalMinus}` : ''}
+                          </span>
                         </div>
                       )}
                     </td>
 
                     {/* Cột 6: Xếp hạng tổ */}
                     <td className="py-3.5 px-4 text-center">
-                      {hideForOtherPhhs ? (
+                      {hideRowSensitive ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs">
                           <Lock className="w-3 h-3 text-slate-400" /> Bảo mật
                         </span>
                       ) : (
                         <div className="inline-flex items-center justify-center gap-1 font-bold">
-                          {shouldHideScores ? (
-                            <span className="text-slate-300 blur-xs text-xs font-bold">???</span>
-                          ) : (
-                            <>
-                              {row.rankInGroup === 1 && (
-                                <span className="px-2.5 py-0.5 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700/60 text-[11px] font-black flex items-center gap-1">
-                                  🥇 Hạng 1
-                                </span>
-                              )}
-                              {row.rankInGroup === 2 && (
-                                <span className="px-2.5 py-0.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-[11px] font-bold flex items-center gap-1">
-                                  🥈 Hạng 2
-                                </span>
-                              )}
-                              {row.rankInGroup === 3 && (
-                                <span className="px-2.5 py-0.5 rounded-lg bg-amber-600 dark:bg-amber-700 text-white text-[11px] font-bold flex items-center gap-1">
-                                  🥉 Hạng 3
-                                </span>
-                              )}
-                              {row.rankInGroup > 3 && (
-                                <span className="text-slate-600 text-xs">Hạng {row.rankInGroup}</span>
-                              )}
-                            </>
+                          {row.rankInGroup === 1 && (
+                            <span className="px-2.5 py-0.5 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700/60 text-[11px] font-black flex items-center gap-1">
+                              🥇 Hạng 1
+                            </span>
+                          )}
+                          {row.rankInGroup === 2 && (
+                            <span className="px-2.5 py-0.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-[11px] font-bold flex items-center gap-1">
+                              🥈 Hạng 2
+                            </span>
+                          )}
+                          {row.rankInGroup === 3 && (
+                            <span className="px-2.5 py-0.5 rounded-lg bg-amber-600 dark:bg-amber-700 text-white text-[11px] font-bold flex items-center gap-1">
+                              🥉 Hạng 3
+                            </span>
+                          )}
+                          {row.rankInGroup > 3 && (
+                            <span className="text-slate-600 text-xs">Hạng {row.rankInGroup}</span>
                           )}
                         </div>
                       )}
@@ -1075,7 +1080,7 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
 
                     {/* Thao tác */}
                     <td className="py-3.5 px-4 text-right">
-                      {hideForOtherPhhs ? (
+                      {hideRowSensitive ? (
                         <span className="text-[11px] text-slate-400 font-medium italic inline-flex items-center gap-1">
                           <Lock className="w-3 h-3 text-slate-400" /> Bảo mật
                         </span>
@@ -1229,7 +1234,10 @@ export const GroupScoreView: React.FC<GroupScoreViewProps> = ({
         students={students}
         records={records}
         currentWeek={currentWeek}
-        shouldHideScores={shouldHideScores}
+        shouldHideScores={shouldHideCrossWeekModal}
+        hiddenWeeks={isTeacherOrAdmin ? [] : (selectedClass?.hiddenWeeks2_1 || [])}
+        selectedClass={selectedClass}
+        systemConfig={systemConfig}
         onNavigateToFullProgressView={(studentId) => {
           setIsProgressModalOpen(false);
           onViewStudentProgress?.(targetStudentForProgress || students.find((s) => s.id === studentId) || students[0]);

@@ -511,10 +511,10 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                       </div>
                       <div>
                         <h4 className="font-black text-slate-800 dark:text-white text-sm">
-                          Ẩn Điểm Xếp Hạng Công Khai (Mục 2.1, 2.2, 2.3.2)
+                          Ẩn Điểm &amp; Xếp Hạng Công Khai Toàn Hệ Thống
                         </h4>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                          Khi bật, học sinh và phụ huynh sẽ không thấy điểm số chi tiết trên các bảng xếp hạng tuần/tháng. Chỉ Admin và GVCN mới có quyền xem để đảm bảo tính riêng tư hoặc bảo mật kết quả đến cuối kỳ.
+                          Khi bật, điểm số, thứ hạng, biểu đồ, nhật ký sự vụ, xuất CSV/in ấn và truy vấn điểm AI trên cả máy tính lẫn điện thoại sẽ được ẩn hoàn toàn khỏi học sinh, phụ huynh và ban cán sự lớp. Chỉ Admin và GVCN mới có quyền xem.
                         </p>
                       </div>
                     </div>

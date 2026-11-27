@@ -18,9 +18,10 @@ import {
   Code,
   Lock,
 } from 'lucide-react';
-import { Student, PointRecord, SchoolClass } from '../types.ts';
+import { Student, PointRecord, SchoolClass, SchoolSystemConfig } from '../types.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { sendAiAssistantMessage } from '../services/aiAssistant.ts';
+import { getHiddenWeeksSet } from '../utils/privacyMasking.ts';
 
 interface PromptLogModalProps {
   isOpen: boolean;
@@ -30,6 +31,7 @@ interface PromptLogModalProps {
   selectedClassId?: string;
   selectedClass?: SchoolClass;
   currentWeek?: number;
+  systemConfig?: SchoolSystemConfig;
 }
 
 export const PromptLogModal: React.FC<PromptLogModalProps> = ({
@@ -41,7 +43,8 @@ export const PromptLogModal: React.FC<PromptLogModalProps> = ({
   selectedClass,
   currentWeek = 9,
 }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, isTeacherOrAdmin } = useAuth();
+  const hiddenWeeksSet = getHiddenWeeksSet(selectedClass, isTeacherOrAdmin);
   const [activeModule, setActiveModule] = useState<'gvcn' | 'phhs'>('gvcn');
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
@@ -81,13 +84,16 @@ Nếu phụ huynh hỏi về học sinh khác, hãy lịch sự từ chối vì 
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  // Auto-populate student issues for Module 3 test
+  // Auto-populate student issues for Module 3 test (Teacher / Admin only)
   const handleSelectStudentForLog = (studentId: string) => {
+    if (!isTeacherOrAdmin) return;
     setSelectedStudentId(studentId);
     const st = students.find((s) => s.id === studentId);
     if (!st) return;
 
-    const stRecords = records.filter((r) => (r.studentId === studentId || r.studentName === st.name) && r.week === currentWeek);
+    const stRecords = records.filter(
+      (r) => !hiddenWeeksSet.has(r.week) && (r.studentId === studentId || r.studentName === st.name) && r.week === currentWeek
+    );
     const plusRecs = stRecords.filter((r) => r.type === 'plus');
     const minusRecs = stRecords.filter((r) => r.type === 'minus');
 
@@ -289,8 +295,8 @@ Nếu phụ huynh hỏi về học sinh khác, hãy lịch sự từ chối vì 
                     <span>Dữ liệu đầu vào thực tế (User Prompt):</span>
                   </label>
 
-                  {/* Student quick picker */}
-                  {students.length > 0 && (
+                  {/* Student quick picker (Admin / GVCN only to protect student privacy) */}
+                  {isTeacherOrAdmin && students.length > 0 && (
                     <div className="flex items-center gap-1.5">
                       <span className="text-[11px] text-slate-500">Chọn HS thực tế:</span>
                       <select

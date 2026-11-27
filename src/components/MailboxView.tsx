@@ -92,7 +92,22 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
   initialSubTab,
 }) => {
   const { currentUser, isAllPermitted, isTeacherOrAdmin } = useAuth();
-  const shouldHideScores = systemConfig?.hideRankingScores && !isTeacherOrAdmin;
+  const shouldHideScores = Boolean(systemConfig?.hideRankingScores && !isTeacherOrAdmin);
+  const isPhhs = currentUser?.role === 'phhs';
+  const isReportHiddenForUser = (report: ScoreReport) => {
+    if (isTeacherOrAdmin) return false;
+    if (shouldHideScores) return true;
+    if (selectedClass?.hiddenWeeks2_1?.includes(report.week)) return true;
+    if (isPhhs) {
+      const matchesId = Boolean(currentUser?.studentId && report.studentId === currentUser.studentId);
+      const matchesName = Boolean(
+        currentUser?.studentName &&
+        report.studentName?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()
+      );
+      if (!matchesId && !matchesName) return true;
+    }
+    return false;
+  };
 
   const [activeSubTab, setActiveSubTab] = useState<'reports' | 'suggestions' | 'supplemental'>(
     initialSubTab || 'reports'
@@ -317,14 +332,15 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
       }
       if (reportSearchQuery.trim()) {
         const q = reportSearchQuery.toLowerCase().trim();
-        const matchStudent = !shouldHideScores && r.studentName.toLowerCase().includes(q);
-        const matchReporter = !shouldHideScores && r.reporterName.toLowerCase().includes(q);
-        const matchDesc = r.errorDescription.toLowerCase().includes(q);
+        const hideThisReport = isReportHiddenForUser(r);
+        const matchStudent = !hideThisReport && r.studentName.toLowerCase().includes(q);
+        const matchReporter = !hideThisReport && r.reporterName.toLowerCase().includes(q);
+        const matchDesc = !hideThisReport && r.errorDescription.toLowerCase().includes(q);
         if (!matchStudent && !matchReporter && !matchDesc) return false;
       }
       return true;
     });
-  }, [reports, reportFilterClass, reportFilterWeek, reportFilterGroup, reportFilterStatus, reportSearchQuery]);
+  }, [reports, reportFilterClass, reportFilterWeek, reportFilterGroup, reportFilterStatus, reportSearchQuery, shouldHideScores, isTeacherOrAdmin, selectedClass, currentUser]);
 
   // Open academic weeks (5.1: Chỉ có thể báo cáo tuần đang mở sổ điểm)
   const openWeeks = useMemo(() => {
@@ -706,6 +722,7 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
             <div className="space-y-3">
               {filteredReports.map((report) => {
                 const canHandle = canResolveReport(report);
+                const hideThisReport = isReportHiddenForUser(report);
                 const groupLeaderAcc = DEFAULT_ACCOUNTS.find((a) => a.username === `to${report.group}`);
 
                 return (
@@ -723,7 +740,7 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-black text-sm text-slate-800 dark:text-slate-100">
-                          {shouldHideScores ? 'Học sinh Bảo mật' : report.studentName}
+                          {hideThisReport ? 'Học sinh Bảo mật' : report.studentName}
                         </span>
                         <span className="px-2 py-0.5 rounded-lg bg-blue-50 dark:bg-blue-950/80 text-blue-700 dark:text-blue-300 font-black text-[11px] border border-blue-200 dark:border-blue-900">
                           Tổ {report.group}
@@ -764,14 +781,14 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
                           Nội dung phản ánh sai sót:
                         </span>
                         <p className="text-slate-700 dark:text-slate-200 font-medium leading-relaxed">
-                          {report.errorDescription}
+                          {hideThisReport ? 'Nội dung phản ánh đang được bảo mật cho tới khi điểm tuần này được mở công khai.' : report.errorDescription}
                         </p>
                       </div>
 
                       {report.pointRecordSummary && (
                         <div className="p-2.5 rounded-xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-100 dark:border-blue-900/40 text-[11px] text-blue-900 dark:text-blue-300 flex items-center justify-between">
                           <span>
-                            <strong>Bản ghi điểm nghi vấn:</strong> {shouldHideScores ? 'Thông tin đang ẩn' : report.pointRecordSummary}
+                            <strong>Bản ghi điểm nghi vấn:</strong> {hideThisReport ? 'Thông tin đang ẩn' : report.pointRecordSummary}
                           </span>
                           <button
                             onClick={() => onNavigateToGroup(report.group)}
@@ -782,7 +799,7 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
                         </div>
                       )}
 
-                      {report.evidenceOrNote && (
+                      {report.evidenceOrNote && !hideThisReport && (
                         <p className="text-[11px] text-slate-500 italic">
                           Minh chứng / Ghi chú thêm: {report.evidenceOrNote}
                         </p>
@@ -812,8 +829,8 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
 
                       <div className="text-slate-400 text-[10px]">
                         Gửi lúc: {new Date(report.createdAt).toLocaleString('vi-VN')} bởi{' '}
-                        <strong className="text-slate-600 dark:text-slate-300">{shouldHideScores ? 'Người gửi Bảo mật' : report.reporterName}</strong>
-                        {!shouldHideScores && report.reporterRoleOrRelationship ? ` (${report.reporterRoleOrRelationship})` : ''}
+                        <strong className="text-slate-600 dark:text-slate-300">{hideThisReport ? 'Người gửi Bảo mật' : report.reporterName}</strong>
+                        {!hideThisReport && report.reporterRoleOrRelationship ? ` (${report.reporterRoleOrRelationship})` : ''}
                       </div>
                     </div>
 
@@ -1664,6 +1681,7 @@ export const MailboxView: React.FC<MailboxViewProps> = ({
         weekLocks={weekLocks}
         selectedClassId={selectedClassId}
         selectedClass={selectedClass}
+        systemConfig={systemConfig}
       />
 
       <CreateSuggestionModal

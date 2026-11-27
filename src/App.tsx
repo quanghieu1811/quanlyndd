@@ -830,6 +830,7 @@ function MainContent() {
             onOpenLogin={() => handleOpenLogin()}
             systemConfig={systemConfig}
             selectedClassId={selectedClassId}
+            selectedClass={selectedClass}
           />
         )}
 
@@ -989,6 +990,7 @@ function MainContent() {
             systemConfig={systemConfig}
             onOpenSystemSettings={() => setIsSystemSettingsOpen(true)}
             selectedClassId={selectedClassId}
+            selectedClass={selectedClass}
           />
         )}
 

@@ -6,6 +6,14 @@ import { StudentWeeklyProgressModal } from './StudentWeeklyProgressModal.tsx';
 import { getStudentCanonicalSTT } from '../utils/vietnameseSorting.ts';
 import { saveSchoolClass } from '../services/db.ts';
 import {
+  isGlobalRankingHidden,
+  getHiddenWeeksSet,
+  isMyChildStudent,
+  MASK_SCORE,
+  MASK_RANK,
+  MASK_STUDENT_NAME,
+} from '../utils/privacyMasking.ts';
+import {
   Trophy,
   Medal,
   Award,
@@ -48,39 +56,56 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
   onViewStudentProgress,
   systemConfig,
   selectedClassId = '8A1',
+  selectedClass: selectedClassProp,
 }) => {
   const [viewScope, setViewScope] = useState<'current_week' | 'all_weeks'>('current_week');
   const [selectedStudentForProgress, setSelectedStudentForProgress] = useState<Student | null>(null);
   const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
-  const { currentUser, isTeacherOrAdmin, canManageGroup } = useAuth();
+  const { currentUser, isTeacherOrAdmin } = useAuth();
 
   const isPhhs = currentUser?.role === 'phhs';
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (currentUser.studentName && stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()) return true;
-    return false;
-  };
-
-  const shouldHideScores = systemConfig?.hideRankingScores && !isTeacherOrAdmin;
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
 
   const selectedClass = useMemo(() => {
+    if (selectedClassProp) return selectedClassProp;
     const list = systemConfig?.classes?.length ? systemConfig.classes : PILOT_CLASSES;
     return list.find((c) => c.id === selectedClassId) || list[0];
-  }, [systemConfig?.classes, selectedClassId]);
+  }, [selectedClassProp, systemConfig?.classes, selectedClassId]);
+
+  const hiddenGlobal = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = useMemo(
+    () => getHiddenWeeksSet(selectedClass, isTeacherOrAdmin),
+    [selectedClass, isTeacherOrAdmin]
+  );
+
+  const isWeekHidden = Boolean(selectedClass?.hiddenWeeks2_1?.includes(currentWeek));
+  const effectiveHideData =
+    hiddenGlobal || (viewScope === 'current_week' && hiddenWeeksSet.has(currentWeek));
 
   const classBase = selectedClass?.baseScore ?? 100;
-  const groupBase = Math.round(classBase / 4);
   const className = selectedClass?.name || `Lớp ${selectedClassId}`;
   const classNameUpper = className.toUpperCase();
 
-  // Filter records based on view scope
+  // Filter records based on view scope and visible weeks for user
   const targetRecords = useMemo(() => {
+    if (hiddenGlobal) return [];
     if (viewScope === 'current_week') {
+      if (hiddenWeeksSet.has(currentWeek)) return [];
       return records.filter((r) => r.week === currentWeek);
     }
-    return records;
-  }, [records, currentWeek, viewScope]);
+    return records.filter((r) => !hiddenWeeksSet.has(r.week));
+  }, [records, currentWeek, viewScope, hiddenGlobal, hiddenWeeksSet]);
+
+  const countVisibleWeeks = (startWeek: number) => {
+    if (viewScope === 'current_week') {
+      return currentWeek >= startWeek && !hiddenWeeksSet.has(currentWeek) ? 1 : 0;
+    }
+    let count = 0;
+    for (let w = startWeek; w <= currentWeek; w++) {
+      if (!hiddenWeeksSet.has(w)) count++;
+    }
+    return count;
+  };
 
   // Compute stats for 4 groups
   // Formula: Điểm trung bình tổ = Tổng điểm tổ / Tổng số học sinh của tổ (9 học sinh / tổ)
@@ -100,13 +125,10 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
       const totalMinus = gRecords
         .filter((r) => r.type === 'minus')
         .reduce((sum, r) => sum + r.points, 0);
-      const numWeeks = viewScope === 'current_week' ? 1 : Math.max(...students.map(s => currentWeek - (s.startWeek || 1) + 1), 1);
       
       const totalScore = gStudents.reduce((sum, s) => {
         const sBase = s.baseScore ?? classBase;
-        const sWeeks = viewScope === 'current_week' 
-          ? (currentWeek >= (s.startWeek || 1) ? 1 : 0)
-          : Math.max(0, currentWeek - (s.startWeek || 1) + 1);
+        const sWeeks = countVisibleWeeks(s.startWeek || 1);
         const sTotalBase = sBase * sWeeks;
         const sPlus = gRecords.filter(r => (r.studentId === s.id || r.studentName === s.name) && r.type === 'plus').reduce((total, r) => total + r.points, 0);
         const sMinus = gRecords.filter(r => (r.studentId === s.id || r.studentName === s.name) && r.type === 'minus').reduce((total, r) => total + r.points, 0);
@@ -126,6 +148,14 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
       };
     });
 
+    if (effectiveHideData) {
+      groups.sort((a, b) => a.group - b.group);
+      return groups.map((g) => ({
+        ...g,
+        rank: 0,
+      }));
+    }
+
     // Sort by averageScore descending
     groups.sort((a, b) => b.averageScore - a.averageScore || b.totalScore - a.totalScore);
 
@@ -133,18 +163,17 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
       ...g,
       rank: groups.findIndex((other) => other.averageScore === g.averageScore && other.totalScore === g.totalScore) + 1,
     }));
-  }, [students, targetRecords, viewScope, currentWeek]);
+  }, [students, targetRecords, viewScope, currentWeek, classBase, effectiveHideData, hiddenWeeksSet]);
 
-  // Top students across the entire class 8A1
+  // Top students across the entire class
   const topStudents = useMemo(() => {
+    if (effectiveHideData) return [];
     const studentScoreMap = students.map((stu) => {
       const stuRecords = targetRecords.filter((r) => r.studentId === stu.id || r.studentName === stu.name);
       const plus = stuRecords.filter((r) => r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
       const minus = stuRecords.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
       const sBase = stu.baseScore ?? classBase;
-      const sWeeks = viewScope === 'current_week' 
-        ? (currentWeek >= (stu.startWeek || 1) ? 1 : 0)
-        : Math.max(0, currentWeek - (stu.startWeek || 1) + 1);
+      const sWeeks = countVisibleWeeks(stu.startWeek || 1);
       const score = (sBase * sWeeks) + plus - minus;
       return {
         student: stu,
@@ -161,7 +190,7 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
       rank: sorted.findIndex((s) => s.score === item.score && s.plus === item.plus) + 1,
     }));
     return withRank.slice(0, 5);
-  }, [students, targetRecords, classBase, viewScope, currentWeek]);
+  }, [students, targetRecords, classBase, viewScope, currentWeek, effectiveHideData, hiddenWeeksSet]);
 
   // Penalized students (>6 minus points -> Chép phạt)
   const penalizedStudents = useMemo(() => {
@@ -208,15 +237,7 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
     }
   };
 
-  const highestScore = Math.max(...groupRankings.map((g) => Math.abs(g.averageScore)), 10);
-
-  const isWeekHidden = Boolean(selectedClass?.hiddenWeeks2_1?.includes(currentWeek));
-  const effectiveHideData = (shouldHideScores || isWeekHidden) && !isTeacherOrAdmin;
-  const isGroupDataHidden = (gNum: number) => {
-    if (isTeacherOrAdmin) return false;
-    if (canManageGroup(gNum)) return false;
-    return effectiveHideData;
-  };
+  const isGroupDataHidden = (_gNum: number) => effectiveHideData;
 
   return (
     <div className="space-y-6">
@@ -361,7 +382,13 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
 
             {onViewStudentProgress && (
               <button
-                onClick={() => onViewStudentProgress(topStudents[0]?.student || students[0])}
+                onClick={() =>
+                  onViewStudentProgress(
+                    effectiveHideData || isPhhs
+                      ? students.find((s) => isMyChild(s)) || students[0]
+                      : topStudents[0]?.student || students[0]
+                  )
+                }
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition cursor-pointer"
                 title="Xem Biểu Đồ & Lịch Sử Thi Đua Từng Học Sinh Qua Các Tuần"
               >
@@ -370,23 +397,25 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
               </button>
             )}
 
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-            >
-              <Printer className="w-3.5 h-3.5 text-slate-600" />
-              In bảng xếp loại
-            </button>
+            {!effectiveHideData && !isPhhs && (
+              <button
+                onClick={handlePrint}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-600" />
+                In bảng xếp loại
+              </button>
+            )}
           </div>
         </div>
 
         {/* Podium visualization of the top 3 groups */}
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-5 pt-4 border-t border-slate-100">
           {groupRankings.map((g) => {
-            const isFirst = g.rank === 1;
-            const isSecond = g.rank === 2;
-            const isThird = g.rank === 3;
             const hideGroup = isGroupDataHidden(g.group);
+            const isFirst = !hideGroup && g.rank === 1;
+            const isSecond = !hideGroup && g.rank === 2;
+            const isThird = !hideGroup && g.rank === 3;
 
             return (
               <div
@@ -394,21 +423,21 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                 onClick={() => !hideGroup ? onSelectGroup(g.group) : null}
                 className={`rounded-2xl p-4 border transition relative overflow-hidden flex flex-col justify-between ${
                   hideGroup
-                    ? 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed opacity-80'
+                    ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
                     : isFirst
                     ? 'bg-gradient-to-b from-amber-500/15 via-amber-500/5 to-white dark:to-slate-900/50 border-amber-400 dark:border-amber-500/70 shadow-md shadow-amber-500/10 ring-2 ring-amber-400/40 cursor-pointer'
                     : isSecond
-                    ? 'bg-slate-50 dark:bg-slate-800/40 border-slate-300 dark:border-slate-600 hover:border-slate-400 dark:hover:border-slate-500'
+                    ? 'bg-slate-50 dark:bg-slate-800/40 border-slate-300 dark:border-slate-600 hover:border-slate-400 dark:hover:border-slate-500 cursor-pointer'
                     : isThird
-                    ? 'bg-amber-700/5 dark:bg-amber-950/20 border-amber-300/80 dark:border-amber-700/60 hover:border-amber-400'
-                    : 'bg-white dark:bg-slate-900/30 border-slate-200 dark:border-slate-700 hover:border-slate-300'
+                    ? 'bg-amber-700/5 dark:bg-amber-950/20 border-amber-300/80 dark:border-amber-700/60 hover:border-amber-400 cursor-pointer'
+                    : 'bg-white dark:bg-slate-900/30 border-slate-200 dark:border-slate-700 hover:border-slate-300 cursor-pointer'
                 }`}
               >
                 <div className="flex items-center justify-between mb-3">
                   <span
                     className={`inline-flex items-center justify-center w-8 h-8 rounded-xl font-black text-sm ${
                       hideGroup
-                        ? 'bg-slate-50 text-slate-300'
+                        ? 'bg-slate-100 text-slate-400'
                         : isFirst
                         ? 'bg-amber-400 text-amber-950 shadow-sm'
                         : isSecond
@@ -418,7 +447,7 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                         : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                     }`}
                   >
-                    {hideGroup ? '?' : `#${g.rank}`}
+                    {hideGroup ? MASK_RANK : `#${g.rank}`}
                   </span>
                   <span className="text-xs font-extrabold text-slate-800 dark:text-white">{g.name}</span>
                 </div>
@@ -427,16 +456,18 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                   <div className="text-[11px] text-slate-500 dark:text-slate-300 font-medium">Điểm trung bình (ĐTB):</div>
                   <div
                     className={`text-2xl font-black tracking-tight ${
-                      hideGroup ? 'text-slate-300 blur-xs' : (g.averageScore >= 0 ? 'text-blue-700 dark:text-blue-400' : 'text-rose-600 dark:text-rose-400')
+                      hideGroup ? 'text-slate-400' : (g.averageScore >= 0 ? 'text-blue-700 dark:text-blue-400' : 'text-rose-600 dark:text-rose-400')
                     }`}
                   >
-                    {hideGroup ? '???' : (g.averageScore >= 0 ? `+${g.averageScore}` : g.averageScore)}
-                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1">đ/HS</span>
+                    {hideGroup ? MASK_SCORE : (g.averageScore >= 0 ? `+${g.averageScore}` : g.averageScore)}
+                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1">
+                      {hideGroup ? '(Bảo mật)' : 'đ/HS'}
+                    </span>
                   </div>
                 </div>
 
                 <div className="mt-3 pt-3 border-t border-slate-100/80 dark:border-slate-700/80 flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
-                  <span>Tổng điểm: <b className={`dark:text-white ${hideGroup ? 'blur-xs' : 'text-slate-800'}`}>{hideGroup ? '???' : (g.totalScore > 0 ? `+${g.totalScore}` : g.totalScore)}đ</b></span>
+                  <span>Tổng điểm: <b className="dark:text-white text-slate-800">{hideGroup ? MASK_SCORE : `${g.totalScore > 0 ? `+${g.totalScore}` : g.totalScore}đ`}</b></span>
                   <span>Sĩ số: <b className="text-slate-800 dark:text-white">{g.studentCount} HS</b></span>
                 </div>
 
@@ -530,17 +561,17 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                   </td>
 
                   <td className="py-3.5 px-4 text-center font-bold text-emerald-600">
-                    {hideGroup ? '???' : `+${g.totalPlus} đ`}
+                    {hideGroup ? MASK_SCORE : `+${g.totalPlus} đ`}
                   </td>
 
                   <td className="py-3.5 px-4 text-center font-bold text-rose-600">
-                    {hideGroup ? '???' : `-${g.totalMinus} đ`}
+                    {hideGroup ? MASK_SCORE : `-${g.totalMinus} đ`}
                   </td>
 
                   <td className="py-3.5 px-4 text-center">
                     <span
                       className={`font-black px-2.5 py-1 rounded-lg ${
-                        hideGroup ? 'bg-slate-50 text-slate-300' : (g.totalScore >= 0
+                        hideGroup ? 'bg-slate-100 text-slate-400' : (g.totalScore >= 0
                           ? 'bg-blue-50 text-blue-700'
                           : 'bg-rose-50 text-rose-700')
                       }`}
@@ -550,8 +581,8 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                   </td>
 
                   <td className="py-3.5 px-4 text-center bg-blue-50/40">
-                    <span className={`text-sm font-black text-blue-700 ${hideGroup ? 'blur-xs' : ''}`}>
-                      {hideGroup ? '???' : (g.averageScore >= 0 ? `+${g.averageScore}` : g.averageScore)}
+                    <span className={`text-sm font-black ${hideGroup ? 'text-slate-400' : 'text-blue-700'}`}>
+                      {hideGroup ? MASK_SCORE : (g.averageScore >= 0 ? `+${g.averageScore}` : g.averageScore)}
                     </span>
                   </td>
 
@@ -617,72 +648,83 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
           </div>
 
           <div className="space-y-2">
-            {topStudents.map((item, idx) => {
-              const myChild = isMyChild(item.student);
-              const hideForOtherPhhs = isPhhs && !myChild;
-              const maskScore = effectiveHideData || hideForOtherPhhs;
+            {effectiveHideData ? (
+              <div className="p-8 text-center text-xs text-slate-500 border border-dashed border-amber-300 bg-amber-50/30 rounded-xl space-y-2">
+                <Lock className="w-7 h-7 text-amber-500 mx-auto" />
+                <div className="font-bold text-slate-700">Bảng Vinh Danh Top 5 Đang Được Bảo Mật</div>
+                <p className="text-[11px] text-slate-500">
+                  Danh sách và điểm số cá nhân đang được tạm ẩn theo thiết lập của GVCN / Quản trị viên.
+                </p>
+              </div>
+            ) : (
+              topStudents.map((item) => {
+                const myChild = isMyChild(item.student);
+                const hideForOtherPhhs = isPhhs && !myChild;
 
-              return (
-                <div
-                  key={item.student.id}
-                  onClick={() => {
-                    if (!hideForOtherPhhs) {
-                      setSelectedStudentForProgress(item.student);
-                      setIsProgressModalOpen(true);
-                    }
-                  }}
-                  className={`p-2.5 rounded-xl border transition ${
-                    myChild
-                      ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50/80 dark:bg-emerald-950/40 ring-1 ring-emerald-400'
-                      : 'border-slate-100 hover:border-emerald-200 bg-slate-50/50'
-                  } ${!hideForOtherPhhs ? 'cursor-pointer hover:bg-emerald-50/30' : ''}`}
-                  title={hideForOtherPhhs ? 'Điểm của học sinh khác được bảo mật' : 'Bấm để xem lịch sử và biểu đồ thi đua qua các tuần'}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span
-                      className={`w-6 h-6 rounded-lg text-xs font-black flex items-center justify-center ${
-                        item.rank === 1
-                          ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
-                          : item.rank === 2
-                          ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 font-black'
-                          : item.rank === 3
-                          ? 'bg-amber-600 dark:bg-amber-700 text-white font-black'
-                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold'
-                      }`}
-                    >
-                      {item.rank}
-                    </span>
-                    <div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                          {hideForOtherPhhs ? `Học sinh #${getStudentCanonicalSTT(item.student)}` : item.student.name}
-                        </h4>
-                        {myChild && (
-                          <span className="text-[10px] font-black bg-emerald-600 text-white px-2 py-0.2 rounded-full">
-                            👨‍👩‍👧 Con của bạn
-                          </span>
-                        )}
-                        <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1 rounded" title={`STT toàn lớp: #${getStudentCanonicalSTT(item.student)}`}>
-                          #{getStudentCanonicalSTT(item.student)}
+                return (
+                  <div
+                    key={item.student.id}
+                    onClick={() => {
+                      if (!hideForOtherPhhs) {
+                        setSelectedStudentForProgress(item.student);
+                        setIsProgressModalOpen(true);
+                      }
+                    }}
+                    className={`p-2.5 rounded-xl border transition flex items-center justify-between ${
+                      myChild
+                        ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50/80 dark:bg-emerald-950/40 ring-1 ring-emerald-400'
+                        : 'border-slate-100 hover:border-emerald-200 bg-slate-50/50'
+                    } ${!hideForOtherPhhs ? 'cursor-pointer hover:bg-emerald-50/30' : ''}`}
+                    title={hideForOtherPhhs ? 'Điểm của học sinh khác được bảo mật' : 'Bấm để xem lịch sử và biểu đồ thi đua qua các tuần'}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span
+                        className={`w-6 h-6 rounded-lg text-xs font-black flex items-center justify-center ${
+                          item.rank === 1
+                            ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
+                            : item.rank === 2
+                            ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 font-black'
+                            : item.rank === 3
+                            ? 'bg-amber-600 dark:bg-amber-700 text-white font-black'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold'
+                        }`}
+                      >
+                        {item.rank}
+                      </span>
+                      <div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                            {hideForOtherPhhs ? MASK_STUDENT_NAME : item.student.name}
+                          </h4>
+                          {myChild && (
+                            <span className="text-[10px] font-black bg-emerald-600 text-white px-2 py-0.2 rounded-full">
+                              👨‍👩‍👧 Con của bạn
+                            </span>
+                          )}
+                          {!hideForOtherPhhs && (
+                            <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1 rounded" title={`STT toàn lớp: #${getStudentCanonicalSTT(item.student)}`}>
+                              #{getStudentCanonicalSTT(item.student)}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-500">
+                          Tổ {item.student.group} {!hideForOtherPhhs && item.student.roleInGroup ? `• ${item.student.roleInGroup}` : ''}
                         </span>
                       </div>
-                      <span className="text-[11px] text-slate-500">
-                        Tổ {item.student.group} {item.student.roleInGroup ? `• ${item.student.roleInGroup}` : ''}
-                      </span>
                     </div>
-                  </div>
 
-                  <div className="text-right">
-                    <span className={`font-black text-sm block ${maskScore ? 'text-slate-400' : 'text-emerald-600'}`}>
-                      {maskScore ? '***' : `+${item.score} điểm`}
-                    </span>
-                    <div className="text-[10px] text-slate-400">
-                      {maskScore ? '(Bảo mật)' : `(+${item.plus}đ / -${item.minus}đ)`}
+                    <div className="text-right">
+                      <span className={`font-black text-sm block ${hideForOtherPhhs ? 'text-slate-400' : 'text-emerald-600'}`}>
+                        {hideForOtherPhhs ? MASK_SCORE : `+${item.score} điểm`}
+                      </span>
+                      <div className="text-[10px] text-slate-400">
+                        {hideForOtherPhhs ? '(Bảo mật)' : `(+${item.plus}đ / -${item.minus}đ)`}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
 
@@ -702,14 +744,22 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                 </span>
               </div>
             </div>
-            {!isPhhs && (
+            {!isPhhs && !effectiveHideData && (
               <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">
                 {penalizedStudents.length} học sinh
               </span>
             )}
           </div>
 
-          {(() => {
+          {effectiveHideData ? (
+            <div className="p-8 text-center text-xs text-slate-500 border border-dashed border-amber-300 bg-amber-50/30 rounded-xl space-y-2">
+              <Lock className="w-7 h-7 text-amber-500 mx-auto" />
+              <div className="font-bold text-slate-700">Thông Tin Vi Phạm &amp; Chép Phạt Đang Được Bảo Mật</div>
+              <p className="text-[11px] text-slate-500">
+                Danh sách chi tiết sẽ được hiển thị khi GVCN hoặc Quản trị viên mở công khai dữ liệu.
+              </p>
+            </div>
+          ) : (() => {
             const displayPenalized = isPhhs 
               ? penalizedStudents.filter(item => isMyChild(item.student))
               : penalizedStudents;
@@ -787,8 +837,8 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
                         </div>
                       ) : (
                         <div>
-                          <span className={`text-xs font-black ${effectiveHideData ? 'text-slate-300 blur-xs' : 'text-rose-700'}`}>{effectiveHideData ? '???' : `-${item.minus} đ`}</span>
-                          <span className="block text-[10px] text-rose-500 font-bold">{effectiveHideData ? 'Đang ẩn' : 'Chép phạt'}</span>
+                          <span className="text-xs font-black text-rose-700">-{item.minus} đ</span>
+                          <span className="block text-[10px] text-rose-500 font-bold">Chép phạt</span>
                         </div>
                       )}
                     </div>
@@ -830,6 +880,10 @@ export const ClassRankingView: React.FC<ClassRankingViewProps> = ({
         students={students}
         records={records}
         currentWeek={currentWeek}
+        shouldHideScores={effectiveHideData}
+        hiddenWeeks={Array.from(hiddenWeeksSet)}
+        selectedClass={selectedClass}
+        systemConfig={systemConfig}
         onNavigateToFullProgressView={(studentId) => {
           setIsProgressModalOpen(false);
           onViewStudentProgress?.(selectedStudentForProgress || students.find((s) => s.id === studentId) || students[0]);

@@ -1,10 +1,17 @@
 import React, { useState, useMemo } from 'react';
-import { Student, PointRecord, Role, WeekLockConfig, RuleItem, SchoolSystemConfig } from '../types.ts';
+import { Student, PointRecord, Role, WeekLockConfig, RuleItem, SchoolSystemConfig, SchoolClass } from '../types.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { useTheme } from '../context/ThemeContext.tsx';
 import { isWeekLocked } from '../services/db.ts';
 import { getAcademicWeekInfo } from '../utils/academicWeeks.ts';
 import { StudentWeeklyProgressModal } from './StudentWeeklyProgressModal.tsx';
+import {
+  isGlobalRankingHidden,
+  getHiddenWeeksSet,
+  isMyChildStudent,
+  MASK_SCORE,
+  MASK_RANK,
+} from '../utils/privacyMasking.ts';
 import {
   ResponsiveContainer,
   LineChart,
@@ -68,6 +75,7 @@ interface DashboardViewProps {
   systemConfig?: SchoolSystemConfig;
   onOpenSystemSettings?: () => void;
   selectedClassId?: string;
+  selectedClass?: SchoolClass;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -88,31 +96,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   systemConfig,
   onOpenSystemSettings,
   selectedClassId = '8A1',
+  selectedClass,
 }) => {
   const { currentUser, isAllPermitted, isTeacherOrAdmin } = useAuth();
   const { isDark } = useTheme();
   const isPhhs = currentUser?.role === 'phhs';
 
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (currentUser.studentName && stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()) return true;
-    return false;
-  };
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
 
   const [viewScope, setViewScope] = useState<'current_week' | 'all_weeks'>('current_week');
   const [selectedStudentForProgress, setSelectedStudentForProgress] = useState<Student | null>(null);
   const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
 
+  const hiddenGlobal = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = useMemo(
+    () => getHiddenWeeksSet(selectedClass, isTeacherOrAdmin),
+    [selectedClass, isTeacherOrAdmin]
+  );
+  const isScopeHidden = hiddenGlobal || (viewScope === 'current_week' && hiddenWeeksSet.has(currentWeek));
+
   const currentWeekConfig = weekLocks[currentWeek];
   const isLocked = isWeekLocked(currentWeekConfig);
   const currentWeekInfo = getAcademicWeekInfo(currentWeek);
 
-  // Active records based on scope
+  // Active records based on scope & user visibility
   const activeRecords = useMemo(() => {
-    if (viewScope === 'all_weeks') return records;
+    if (hiddenGlobal) return [];
+    if (viewScope === 'all_weeks') {
+      return records.filter((r) => !hiddenWeeksSet.has(r.week));
+    }
+    if (hiddenWeeksSet.has(currentWeek)) return [];
     return records.filter((r) => r.week === currentWeek);
-  }, [records, viewScope, currentWeek]);
+  }, [records, viewScope, currentWeek, hiddenGlobal, hiddenWeeksSet]);
 
   // Overall Class KPI Metrics
   const classStats = useMemo(() => {
@@ -191,21 +206,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       };
     });
 
+    if (isScopeHidden) {
+      list.sort((a, b) => a.group - b.group);
+      return list.map((item) => ({
+        ...item,
+        rank: 0,
+      }));
+    }
+
     list.sort((a, b) => b.averageScore - a.averageScore || b.total - a.total);
 
     return list.map((item) => ({
       ...item,
       rank: list.findIndex((g) => g.averageScore === item.averageScore && g.total === item.total) + 1,
     }));
-  }, [students, activeRecords, currentWeek]);
+  }, [students, activeRecords, currentWeek, isScopeHidden]);
 
   // Score Trends Across All Weeks (for LineChart)
   // Calculate average scores per team for weeks 1 through max(currentWeek, 4)
   const trendsData = useMemo(() => {
+    if (hiddenGlobal) return [];
     const maxWeek = Math.max(currentWeek, 4);
-    const data = [];
+    const data: Array<Record<string, number | string | null>> = [];
 
     for (let w = 1; w <= maxWeek; w++) {
+      if (hiddenWeeksSet.has(w)) {
+        data.push({
+          weekName: `Tuần ${w}`,
+          week: w,
+          'Tổ 1': null,
+          'Tổ 2': null,
+          'Tổ 3': null,
+          'Tổ 4': null,
+          'TB Lớp': null,
+        });
+        continue;
+      }
       const wRecords = records.filter((r) => r.week === w);
 
       const to1Students = students.filter((s) => s.group === 1).length || 9;
@@ -248,14 +284,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
 
     return data;
-  }, [records, students, currentWeek]);
+  }, [records, students, currentWeek, hiddenGlobal, hiddenWeeksSet]);
 
   // Weekly Positive vs Negative Points (for BarChart)
   const weeklyPlusMinusData = useMemo(() => {
+    if (hiddenGlobal) return [];
     const maxWeek = Math.max(currentWeek, 4);
     const data = [];
 
     for (let w = 1; w <= maxWeek; w++) {
+      if (hiddenWeeksSet.has(w)) {
+        data.push({
+          name: `Tuần ${w}`,
+          'Điểm cộng (+)': 0,
+          'Điểm trừ (-)': 0,
+          'Điểm ròng': 0,
+        });
+        continue;
+      }
       const wRecords = records.filter((r) => r.week === w);
       const plus = wRecords.filter((r) => r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
       const minus = wRecords.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
@@ -269,7 +315,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
 
     return data;
-  }, [records, currentWeek]);
+  }, [records, currentWeek, hiddenGlobal, hiddenWeeksSet]);
 
   // Category Distribution (Pie Chart)
   const categoryData = useMemo(() => {
@@ -357,13 +403,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return list;
   }, [students, activeRecords, isPhhs, currentUser]);
 
-  // Recent scores feed (last 10 records)
+  // Recent scores feed (last 8 visible records)
   const recentRecords = useMemo(() => {
-    const sorted = [...records].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+    if (isScopeHidden || hiddenGlobal) return [];
+    const sorted = [...records]
+      .filter((r) => !hiddenWeeksSet.has(r.week))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return sorted.slice(0, 8);
-  }, [records]);
+  }, [records, isScopeHidden, hiddenGlobal, hiddenWeeksSet]);
 
   // Scoring rules count breakdown
   const rulesBreakdown = useMemo(() => {
@@ -490,7 +537,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {/* Student Cross-Week Progress View Quick Access */}
             {onViewStudentProgress && (
               <button
-                onClick={() => onViewStudentProgress(topStudents[0]?.student || students[0])}
+                onClick={() =>
+                  onViewStudentProgress(
+                    isScopeHidden || isPhhs ? students[0] : (topStudents[0]?.student || students[0])
+                  )
+                }
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-bold transition cursor-pointer"
                 title="Xem Điểm Thi Đua Từng Bạn Qua Các Tuần"
               >
@@ -571,16 +622,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </button>
 
             {/* Print Button */}
-            <button
-              onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
-              title="In báo cáo tổng kết"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">In báo cáo</span>
-            </button>
+            {!isScopeHidden && !isPhhs && (
+              <button
+                onClick={() => window.print()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
+                title="In báo cáo tổng kết"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">In báo cáo</span>
+              </button>
+            )}
           </div>
         </div>
+
+        {isScopeHidden && (
+          <div className="mt-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-300 flex items-start gap-2.5 text-xs text-amber-900">
+            <Lock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-black block">
+                Dữ Liệu Xếp Hạng &amp; Điểm Thi Đua Đang Tạm Ẩn
+              </span>
+              <span className="text-[11px] text-amber-800">
+                Admin hoặc Giáo viên Chủ nhiệm đang bật chế độ bảo mật dữ liệu thi đua. Các số liệu tổng hợp, biểu đồ và bảng xếp hạng được ẩn cho tới khi được mở công khai.
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Executive KPI Metric Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5 mt-5 pt-5 border-t border-slate-100">
@@ -596,8 +663,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="bg-blue-50/60 p-3.5 rounded-2xl border border-blue-200/80">
             <span className="text-[11px] font-semibold text-blue-700 block">Điểm trung bình lớp</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-2xl font-black text-blue-700">{classStats.averageScore}</span>
-              <span className="text-xs text-blue-500">đ / HS</span>
+              <span className="text-2xl font-black text-blue-700">
+                {isScopeHidden ? MASK_SCORE : classStats.averageScore}
+              </span>
+              <span className="text-xs text-blue-500">{isScopeHidden ? 'Bảo mật' : 'đ / HS'}</span>
             </div>
             <span className="text-[10px] text-blue-600 mt-1 block">
               = Tổng điểm ròng / {classStats.totalStudents} HS
@@ -607,32 +676,36 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="bg-emerald-50/60 p-3.5 rounded-2xl border border-emerald-200/80">
             <span className="text-[11px] font-semibold text-emerald-700 block">Tổng Điểm Cộng (+)</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-2xl font-black text-emerald-600">+{classStats.totalPlus}</span>
-              <span className="text-xs text-emerald-600">đ</span>
+              <span className="text-2xl font-black text-emerald-600">
+                {isScopeHidden ? MASK_SCORE : `+${classStats.totalPlus}`}
+              </span>
+              <span className="text-xs text-emerald-600">{isScopeHidden ? '' : 'đ'}</span>
             </div>
             <span className="text-[10px] text-emerald-700 mt-1 block">
-              {classStats.plusCount} lượt khen thưởng
+              {isScopeHidden ? 'Đang tạm ẩn' : `${classStats.plusCount} lượt khen thưởng`}
             </span>
           </div>
 
           <div className="bg-rose-50/60 p-3.5 rounded-2xl border border-rose-200/80">
             <span className="text-[11px] font-semibold text-rose-700 block">Tổng Điểm Trừ (-)</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-2xl font-black text-rose-600">-{classStats.totalMinus}</span>
-              <span className="text-xs text-rose-600">đ</span>
+              <span className="text-2xl font-black text-rose-600">
+                {isScopeHidden ? MASK_SCORE : `-${classStats.totalMinus}`}
+              </span>
+              <span className="text-xs text-rose-600">{isScopeHidden ? '' : 'đ'}</span>
             </div>
             <span className="text-[10px] text-rose-700 mt-1 block">
-              {classStats.minusCount} lượt vi phạm
+              {isScopeHidden ? 'Đang tạm ẩn' : `${classStats.minusCount} lượt vi phạm`}
             </span>
           </div>
 
           <div className="bg-indigo-50/60 p-3.5 rounded-2xl border border-indigo-200/80">
             <span className="text-[11px] font-semibold text-indigo-700 block">Tổng Điểm Ròng Lớp</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className={`text-2xl font-black ${classStats.netScore >= 0 ? 'text-indigo-700' : 'text-rose-600'}`}>
-                {classStats.netScore > 0 ? `+${classStats.netScore}` : classStats.netScore}
+              <span className={`text-2xl font-black ${isScopeHidden ? 'text-slate-400' : (classStats.netScore >= 0 ? 'text-indigo-700' : 'text-rose-600')}`}>
+                {isScopeHidden ? MASK_SCORE : (classStats.netScore > 0 ? `+${classStats.netScore}` : classStats.netScore)}
               </span>
-              <span className="text-xs text-indigo-500">điểm</span>
+              <span className="text-xs text-indigo-500">{isScopeHidden ? '' : 'điểm'}</span>
             </div>
             <span className="text-[10px] text-indigo-600 mt-1 block">Cộng ròng toàn lớp</span>
           </div>
@@ -640,7 +713,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="bg-amber-50/60 p-3.5 rounded-2xl border border-amber-200/80">
             <span className="text-[11px] font-semibold text-amber-700 block">Cảnh báo chép phạt</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-2xl font-black text-amber-700">{classStats.warningStudentsCount}</span>
+              <span className="text-2xl font-black text-amber-700">
+                {isScopeHidden ? MASK_RANK : classStats.warningStudentsCount}
+              </span>
             </div>
             <span className="text-[10px] text-amber-700 mt-1 block">Bị trừ trên 6 điểm</span>
           </div>
@@ -805,16 +880,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {groupRankings.map((item) => {
-            const isFirst = item.rank === 1;
-            const isSecond = item.rank === 2;
-            const isThird = item.rank === 3;
+            const isFirst = !isScopeHidden && item.rank === 1;
+            const isSecond = !isScopeHidden && item.rank === 2;
+            const isThird = !isScopeHidden && item.rank === 3;
 
             return (
               <div
                 key={item.group}
                 onClick={() => onSelectGroup(item.group)}
                 className={`bg-white rounded-3xl p-5 border transition cursor-pointer relative hover:shadow-md group ${
-                  isFirst
+                  isScopeHidden
+                    ? 'border-slate-200'
+                    : isFirst
                     ? 'border-amber-400 dark:border-amber-500/70 ring-2 ring-amber-400/30 shadow-xs'
                     : isSecond
                     ? 'border-slate-300 dark:border-slate-600 shadow-xs'
@@ -828,7 +905,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <div className="flex items-center gap-2">
                     <div
                       className={`w-9 h-9 rounded-2xl flex items-center justify-center font-black text-sm shadow-xs ${
-                        isFirst
+                        isScopeHidden
+                          ? 'bg-slate-100 text-slate-400'
+                          : isFirst
                           ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
                           : isSecond
                           ? 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-100'
@@ -837,7 +916,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                       }`}
                     >
-                      {isFirst ? <Trophy className="w-5 h-5 text-amber-950" /> : `#${item.rank}`}
+                      {isScopeHidden ? MASK_RANK : isFirst ? <Trophy className="w-5 h-5 text-amber-950" /> : `#${item.rank}`}
                     </div>
                     <div>
                       <h3 className="font-black text-base text-slate-800 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition">
@@ -861,13 +940,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <div className="bg-slate-50/80 rounded-2xl p-3 border border-slate-100 mb-3 text-center">
                   <span className="text-[11px] font-semibold text-slate-400 block">Điểm trung bình thi đua</span>
                   <div className="text-2xl font-black text-slate-800 mt-0.5 flex items-center justify-center gap-1">
-                    <span className={item.averageScore >= 0 ? 'text-blue-700' : 'text-rose-600'}>
-                      {item.averageScore > 0 ? `+${item.averageScore}` : item.averageScore}
+                    <span className={isScopeHidden ? 'text-slate-400' : (item.averageScore >= 0 ? 'text-blue-700' : 'text-rose-600')}>
+                      {isScopeHidden ? MASK_SCORE : (item.averageScore > 0 ? `+${item.averageScore}` : item.averageScore)}
                     </span>
-                    <span className="text-xs font-semibold text-slate-400">đ/HS</span>
+                    <span className="text-xs font-semibold text-slate-400">{isScopeHidden ? '' : 'đ/HS'}</span>
                   </div>
                   <span className="text-[10px] text-slate-500 mt-1 block">
-                    Tổng điểm ròng: <b>{item.total > 0 ? `+${item.total}` : item.total}đ</b>
+                    Tổng điểm ròng: <b>{isScopeHidden ? MASK_SCORE : `${item.total > 0 ? `+${item.total}` : item.total}đ`}</b>
                   </span>
                 </div>
 
@@ -875,17 +954,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <div className="space-y-1.5 text-xs text-slate-600">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-400">Điểm cộng:</span>
-                    <span className="font-bold text-emerald-600">+{item.plus} điểm</span>
+                    <span className={`font-bold ${isScopeHidden ? 'text-slate-400' : 'text-emerald-600'}`}>
+                      {isScopeHidden ? MASK_SCORE : `+${item.plus} điểm`}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-400">Điểm trừ:</span>
-                    <span className="font-bold text-rose-600">-{item.minus} điểm</span>
+                    <span className={`font-bold ${isScopeHidden ? 'text-slate-400' : 'text-rose-600'}`}>
+                      {isScopeHidden ? MASK_SCORE : `-${item.minus} điểm`}
+                    </span>
                   </div>
                   {item.topStudent && (
                     <div className="flex items-center justify-between pt-1 border-t border-slate-100 text-[11px]">
                       <span className="text-slate-400">Tiêu biểu:</span>
                       <span className="font-semibold text-slate-800 truncate max-w-[130px]">
-                        {item.topStudent.student.name}
+                        {isScopeHidden ? 'Đang bảo mật' : item.topStudent.student.name}
                       </span>
                     </div>
                   )}
@@ -921,65 +1004,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           <div className="h-72 w-full pt-2">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={trendsData} margin={{ top: 10, right: 20, left: -10, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#1e293b' : '#f1f5f9'} />
-                <XAxis dataKey="weekName" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: isDark ? '#0f172a' : '#ffffff',
-                    borderRadius: '16px',
-                    border: `1px solid ${isDark ? '#1e293b' : '#e2e8f0'}`,
-                    boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.2)',
-                    fontSize: '12px',
-                    color: isDark ? '#f8fafc' : '#0f172a',
-                  }}
-                  itemStyle={{ color: isDark ? '#f8fafc' : '#0f172a' }}
-                />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-                <Line
-                  type="monotone"
-                  dataKey="Tổ 1"
-                  stroke="#2563eb"
-                  strokeWidth={2.5}
-                  dot={{ r: 4 }}
-                  activeDot={{ r: 6 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="Tổ 2"
-                  stroke="#10b981"
-                  strokeWidth={2.5}
-                  dot={{ r: 4 }}
-                  activeDot={{ r: 6 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="Tổ 3"
-                  stroke="#f59e0b"
-                  strokeWidth={2.5}
-                  dot={{ r: 4 }}
-                  activeDot={{ r: 6 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="Tổ 4"
-                  stroke="#8b5cf6"
-                  strokeWidth={2.5}
-                  dot={{ r: 4 }}
-                  activeDot={{ r: 6 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="TB Lớp"
-                  stroke="#64748b"
-                  strokeDasharray="4 4"
-                  strokeWidth={2}
-                  dot={{ r: 3 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {hiddenGlobal || isScopeHidden ? (
+              <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-amber-300 bg-amber-50/30 text-center p-6 space-y-2">
+                <Lock className="w-7 h-7 text-amber-500" />
+                <span className="text-sm font-bold text-slate-700">Biểu Đồ Xu Hướng Đang Được Bảo Mật</span>
+                <span className="text-xs text-slate-500">Chỉ Admin &amp; GVCN có thể xem khi bật chế độ ẩn dữ liệu.</span>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trendsData} margin={{ top: 10, right: 20, left: -10, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#1e293b' : '#f1f5f9'} />
+                  <XAxis dataKey="weekName" tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                  <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: isDark ? '#0f172a' : '#ffffff',
+                      borderRadius: '16px',
+                      border: `1px solid ${isDark ? '#1e293b' : '#e2e8f0'}`,
+                      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.2)',
+                      fontSize: '12px',
+                      color: isDark ? '#f8fafc' : '#0f172a',
+                    }}
+                    itemStyle={{ color: isDark ? '#f8fafc' : '#0f172a' }}
+                  />
+                  <Legend iconType="circle" wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
+                  <Line type="monotone" dataKey="Tổ 1" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls={false} />
+                  <Line type="monotone" dataKey="Tổ 2" stroke="#10b981" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls={false} />
+                  <Line type="monotone" dataKey="Tổ 3" stroke="#f59e0b" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls={false} />
+                  <Line type="monotone" dataKey="Tổ 4" stroke="#8b5cf6" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls={false} />
+                  <Line type="monotone" dataKey="TB Lớp" stroke="#64748b" strokeDasharray="4 4" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -995,7 +1051,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           <div className="h-56 w-full flex-1">
-            {categoryData.length === 0 ? (
+            {isScopeHidden ? (
+              <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-amber-300 bg-amber-50/30 text-center p-4 space-y-1.5">
+                <Lock className="w-6 h-6 text-amber-500" />
+                <span className="text-xs font-bold text-slate-700">Dữ Liệu Đang Bảo Mật</span>
+              </div>
+            ) : categoryData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-xs text-slate-400">
                 Chưa có dữ liệu phân loại điểm
               </div>
@@ -1030,17 +1091,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             )}
           </div>
 
-          <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
-            {categoryData.map((c, i) => (
-              <div key={i} className="flex items-center justify-between text-[11px]">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: c.color }} />
-                  <span className="text-slate-600 truncate max-w-[170px]">{c.name}</span>
+          {!isScopeHidden && (
+            <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
+              {categoryData.map((c, i) => (
+                <div key={i} className="flex items-center justify-between text-[11px]">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: c.color }} />
+                    <span className="text-slate-600 truncate max-w-[170px]">{c.name}</span>
+                  </div>
+                  <span className="font-bold text-slate-800">{c.value}đ</span>
                 </div>
-                <span className="font-bold text-slate-800">{c.value}đ</span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1058,27 +1121,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         <div className="h-64 w-full pt-2">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={weeklyPlusMinusData} margin={{ top: 10, right: 20, left: -10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#1e293b' : '#f1f5f9'} />
-              <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-              <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: isDark ? '#0f172a' : '#ffffff',
-                  borderRadius: '16px',
-                  border: `1px solid ${isDark ? '#1e293b' : '#e2e8f0'}`,
-                  boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.2)',
-                  fontSize: '12px',
-                  color: isDark ? '#f8fafc' : '#0f172a',
-                }}
-                itemStyle={{ color: isDark ? '#f8fafc' : '#0f172a' }}
-              />
-              <Legend iconType="circle" wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-              <Bar dataKey="Điểm cộng (+)" fill="#10b981" radius={[6, 6, 0, 0]} />
-              <Bar dataKey="Điểm trừ (-)" fill="#f43f5e" radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          {hiddenGlobal || isScopeHidden ? (
+            <div className="h-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-amber-300 bg-amber-50/30 text-center p-6 space-y-2">
+              <Lock className="w-7 h-7 text-amber-500" />
+              <span className="text-sm font-bold text-slate-700">Biểu Đồ Tương Quan Đang Được Bảo Mật</span>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={weeklyPlusMinusData} margin={{ top: 10, right: 20, left: -10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#1e293b' : '#f1f5f9'} />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: isDark ? '#0f172a' : '#ffffff',
+                    borderRadius: '16px',
+                    border: `1px solid ${isDark ? '#1e293b' : '#e2e8f0'}`,
+                    boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.2)',
+                    fontSize: '12px',
+                    color: isDark ? '#f8fafc' : '#0f172a',
+                  }}
+                  itemStyle={{ color: isDark ? '#f8fafc' : '#0f172a' }}
+                />
+                <Legend iconType="circle" wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
+                <Bar dataKey="Điểm cộng (+)" fill="#10b981" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="Điểm trừ (-)" fill="#f43f5e" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 
@@ -1098,72 +1168,79 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
 
-          <div className="space-y-2.5">
-            {topStudents.map((item) => {
-              const isChild = isMyChild(item.student);
-              const hideScore = isPhhs && !isChild;
+          {isScopeHidden ? (
+            <div className="p-8 text-center rounded-2xl border border-dashed border-amber-300 bg-amber-50/30 space-y-1.5">
+              <Lock className="w-7 h-7 text-amber-500 mx-auto" />
+              <div className="font-bold text-xs text-slate-700">Bảng Vinh Danh Top 5 Đang Bảo Mật</div>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {topStudents.map((item) => {
+                const isChild = isMyChild(item.student);
+                const hideScore = isPhhs && !isChild;
 
-              return (
-                <div
-                  key={item.student.id}
-                  onClick={() => {
-                    if (!hideScore) {
-                      setSelectedStudentForProgress(item.student);
-                      setIsProgressModalOpen(true);
-                    }
-                  }}
-                  className={`flex items-center justify-between p-3 rounded-2xl border text-xs transition ${
-                    isChild 
-                      ? 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700 ring-1 ring-amber-400 cursor-pointer' 
-                      : hideScore
-                      ? 'bg-slate-50/60 dark:bg-slate-800/40 border-slate-100 dark:border-slate-800 cursor-not-allowed opacity-90'
-                      : 'bg-slate-50/80 hover:bg-slate-100 border-slate-100 cursor-pointer'
-                  }`}
-                  title={hideScore ? 'Bảo mật: Phụ huynh chỉ xem chi tiết của con' : 'Bấm để xem lịch sử và biểu đồ thi đua qua các tuần'}
-                >
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-7 h-7 rounded-xl font-black flex items-center justify-center text-xs ${
-                        item.rank === 1
-                          ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
-                          : item.rank === 2
-                          ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 font-black'
-                          : item.rank === 3
-                          ? 'bg-amber-600 dark:bg-amber-700 text-white font-black'
-                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold'
-                      }`}
-                    >
-                      {item.rank}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-bold text-slate-800 dark:text-slate-100 hover:text-blue-600 transition block text-xs">
-                          {item.student.name}
-                        </span>
-                        {isChild && (
-                          <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-500 text-white shrink-0">
-                            Con của bạn
-                          </span>
-                        )}
+                return (
+                  <div
+                    key={item.student.id}
+                    onClick={() => {
+                      if (!hideScore) {
+                        setSelectedStudentForProgress(item.student);
+                        setIsProgressModalOpen(true);
+                      }
+                    }}
+                    className={`flex items-center justify-between p-3 rounded-2xl border text-xs transition ${
+                      isChild 
+                        ? 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700 ring-1 ring-amber-400 cursor-pointer' 
+                        : hideScore
+                        ? 'bg-slate-50/60 dark:bg-slate-800/40 border-slate-100 dark:border-slate-800 cursor-not-allowed opacity-90'
+                        : 'bg-slate-50/80 hover:bg-slate-100 border-slate-100 cursor-pointer'
+                    }`}
+                    title={hideScore ? 'Bảo mật: Phụ huynh chỉ xem chi tiết của con' : 'Bấm để xem lịch sử và biểu đồ thi đua qua các tuần'}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className={`w-7 h-7 rounded-xl font-black flex items-center justify-center text-xs ${
+                          item.rank === 1
+                            ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
+                            : item.rank === 2
+                            ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 font-black'
+                            : item.rank === 3
+                            ? 'bg-amber-600 dark:bg-amber-700 text-white font-black'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold'
+                        }`}
+                      >
+                        {item.rank}
                       </div>
-                      <span className="text-[11px] text-slate-400">
-                        Tổ {item.student.group} {item.student.roleInGroup ? `(${item.student.roleInGroup})` : ''}
+                      <div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-slate-800 dark:text-slate-100 hover:text-blue-600 transition block text-xs">
+                            {hideScore ? 'Học sinh Bảo mật' : item.student.name}
+                          </span>
+                          {isChild && (
+                            <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-500 text-white shrink-0">
+                              Con của bạn
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-400">
+                          Tổ {item.student.group} {!hideScore && item.student.roleInGroup ? `(${item.student.roleInGroup})` : ''}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="font-black text-emerald-600 text-sm block">
+                        {hideScore ? MASK_SCORE : `+${item.plus}đ`}
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        Ròng: {hideScore ? `${MASK_SCORE} (Bảo mật)` : `${item.total > 0 ? `+${item.total}` : item.total}đ`}
                       </span>
                     </div>
                   </div>
-
-                  <div className="text-right">
-                    <span className="font-black text-emerald-600 text-sm block">
-                      {hideScore ? '***' : `+${item.plus}đ`}
-                    </span>
-                    <span className="text-[10px] text-slate-400">
-                      Ròng: {hideScore ? '*** (Bảo mật)' : `${item.total > 0 ? `+${item.total}` : item.total}đ`}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Attention & Discipline Cases */}
@@ -1180,63 +1257,70 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
 
-          <div className="space-y-2.5 max-h-[300px] overflow-y-auto">
-            {needAttentionStudents.length === 0 ? (
-              <div className="p-8 text-center text-slate-400 text-xs">
-                Không có học sinh nào bị trừ điểm trong phạm vi đang chọn! Rất tốt.
-              </div>
-            ) : (
-              needAttentionStudents.map((item) => (
-                <div
-                  key={item.student.id}
-                  onClick={() => {
-                    setSelectedStudentForProgress(item.student);
-                    setIsProgressModalOpen(true);
-                  }}
-                  className={`flex items-center justify-between p-3 rounded-2xl border text-xs transition cursor-pointer hover:border-rose-300 ${
-                    item.isPenaltyWarning
-                      ? 'bg-rose-50/60 border-rose-200'
-                      : 'bg-slate-50/80 border-slate-100'
-                  }`}
-                  title="Bấm để xem lịch sử và biểu đồ thi đua qua các tuần"
-                >
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-7 h-7 rounded-xl font-bold flex items-center justify-center text-xs ${
-                        item.isPenaltyWarning
-                          ? 'bg-rose-500 text-white'
-                          : 'bg-slate-200 text-slate-600'
-                      }`}
-                    >
-                      !
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-bold text-slate-800 hover:text-blue-600 transition">{item.student.name}</span>
-                        {item.isPenaltyWarning && (
-                          <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-rose-600 text-white">
-                            Chép phạt (&gt;6đ)
-                          </span>
-                        )}
+          {isScopeHidden ? (
+            <div className="p-8 text-center rounded-2xl border border-dashed border-amber-300 bg-amber-50/30 space-y-1.5">
+              <Lock className="w-7 h-7 text-amber-500 mx-auto" />
+              <div className="font-bold text-xs text-slate-700">Thông Tin Lưu Ý Nề Nếp Đang Bảo Mật</div>
+            </div>
+          ) : (
+            <div className="space-y-2.5 max-h-[300px] overflow-y-auto">
+              {needAttentionStudents.length === 0 ? (
+                <div className="p-8 text-center text-slate-400 text-xs">
+                  Không có học sinh nào bị trừ điểm trong phạm vi đang chọn! Rất tốt.
+                </div>
+              ) : (
+                needAttentionStudents.map((item) => (
+                  <div
+                    key={item.student.id}
+                    onClick={() => {
+                      setSelectedStudentForProgress(item.student);
+                      setIsProgressModalOpen(true);
+                    }}
+                    className={`flex items-center justify-between p-3 rounded-2xl border text-xs transition cursor-pointer hover:border-rose-300 ${
+                      item.isPenaltyWarning
+                        ? 'bg-rose-50/60 border-rose-200'
+                        : 'bg-slate-50/80 border-slate-100'
+                    }`}
+                    title="Bấm để xem lịch sử và biểu đồ thi đua qua các tuần"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className={`w-7 h-7 rounded-xl font-bold flex items-center justify-center text-xs ${
+                          item.isPenaltyWarning
+                            ? 'bg-rose-500 text-white'
+                            : 'bg-slate-200 text-slate-600'
+                        }`}
+                      >
+                        !
                       </div>
-                      <span className="text-[11px] text-slate-400 block">
-                        Tổ {item.student.group} • {item.schoolErrors > 0 ? `${item.schoolErrors} lỗi sao đỏ trường` : 'Lỗi nề nếp lớp'}
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-slate-800 hover:text-blue-600 transition">{item.student.name}</span>
+                          {item.isPenaltyWarning && (
+                            <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-rose-600 text-white">
+                              Chép phạt (&gt;6đ)
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-400 block">
+                          Tổ {item.student.group} • {item.schoolErrors > 0 ? `${item.schoolErrors} lỗi sao đỏ trường` : 'Lỗi nề nếp lớp'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="font-black text-rose-600 text-sm block">
+                        -{item.minus}đ
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        Ròng: {item.net}đ
                       </span>
                     </div>
                   </div>
-
-                  <div className="text-right">
-                    <span className="font-black text-rose-600 text-sm block">
-                      -{item.minus}đ
-                    </span>
-                    <span className="text-[10px] text-slate-400">
-                      Ròng: {item.net}đ
-                    </span>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1248,6 +1332,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         students={students}
         records={records}
         currentWeek={currentWeek}
+        shouldHideScores={isScopeHidden}
+        hiddenWeeks={Array.from(hiddenWeeksSet)}
+        selectedClass={selectedClass}
+        systemConfig={systemConfig}
         onNavigateToFullProgressView={(studentId) => {
           setIsProgressModalOpen(false);
           onViewStudentProgress?.(selectedStudentForProgress || students.find((s) => s.id === studentId) || students[0]);
@@ -1266,54 +1354,64 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <span className="text-xs text-slate-400">Đồng bộ tự động qua Firebase</span>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-slate-200 text-slate-400 text-[11px]">
-                <th className="py-2.5 px-3">Thời gian</th>
-                <th className="py-2.5 px-3">Tổ</th>
-                <th className="py-2.5 px-3">Học sinh</th>
-                <th className="py-2.5 px-3">Nội dung / Tiêu đề</th>
-                <th className="py-2.5 px-3">Lý do cụ thể</th>
-                <th className="py-2.5 px-3">Điểm số</th>
-                <th className="py-2.5 px-3">Người nhập</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {recentRecords.map((r) => (
-                <tr key={r.id} className="hover:bg-slate-50/80 transition">
-                  <td className="py-2.5 px-3 text-slate-400 whitespace-nowrap">
-                    Tuần {r.week}
-                  </td>
-                  <td className="py-2.5 px-3 font-bold text-slate-700">
-                    Tổ {r.group}
-                  </td>
-                  <td className="py-2.5 px-3 font-semibold text-slate-800">
-                    {r.studentName}
-                  </td>
-                  <td className="py-2.5 px-3 text-slate-600 max-w-[200px] truncate">
-                    {r.ruleTitle}
-                  </td>
-                  <td className="py-2.5 px-3 text-slate-500 max-w-[220px] truncate">
-                    {r.reason}
-                  </td>
-                  <td className="py-2.5 px-3 font-black whitespace-nowrap">
-                    <span
-                      className={
-                        r.type === 'plus' ? 'text-emerald-600' : 'text-rose-600'
-                      }
-                    >
-                      {r.type === 'plus' ? `+${r.points}` : `-${r.points}`}đ
-                    </span>
-                  </td>
-                  <td className="py-2.5 px-3 text-slate-400 text-[11px] whitespace-nowrap">
-                    {r.creatorName}
-                  </td>
+        {isScopeHidden || hiddenGlobal ? (
+          <div className="p-8 text-center rounded-2xl border border-dashed border-amber-300 bg-amber-50/30 space-y-1.5">
+            <Lock className="w-7 h-7 text-amber-500 mx-auto" />
+            <div className="font-bold text-xs text-slate-700">Nhật Ký Nhập Điểm Đang Được Bảo Mật</div>
+            <p className="text-[11px] text-slate-500">
+              Các lượt ghi nhận điểm gần đây được tạm ẩn khi chế độ bảo mật đang bật.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-400 text-[11px]">
+                  <th className="py-2.5 px-3">Thời gian</th>
+                  <th className="py-2.5 px-3">Tổ</th>
+                  <th className="py-2.5 px-3">Học sinh</th>
+                  <th className="py-2.5 px-3">Nội dung / Tiêu đề</th>
+                  <th className="py-2.5 px-3">Lý do cụ thể</th>
+                  <th className="py-2.5 px-3">Điểm số</th>
+                  <th className="py-2.5 px-3">Người nhập</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {recentRecords.map((r) => (
+                  <tr key={r.id} className="hover:bg-slate-50/80 transition">
+                    <td className="py-2.5 px-3 text-slate-400 whitespace-nowrap">
+                      Tuần {r.week}
+                    </td>
+                    <td className="py-2.5 px-3 font-bold text-slate-700">
+                      Tổ {r.group}
+                    </td>
+                    <td className="py-2.5 px-3 font-semibold text-slate-800">
+                      {r.studentName}
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-600 max-w-[200px] truncate">
+                      {r.ruleTitle}
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-500 max-w-[220px] truncate">
+                      {r.reason}
+                    </td>
+                    <td className="py-2.5 px-3 font-black whitespace-nowrap">
+                      <span
+                        className={
+                          r.type === 'plus' ? 'text-emerald-600' : 'text-rose-600'
+                        }
+                      >
+                        {r.type === 'plus' ? `+${r.points}` : `-${r.points}`}đ
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-400 text-[11px] whitespace-nowrap">
+                      {r.creatorName}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

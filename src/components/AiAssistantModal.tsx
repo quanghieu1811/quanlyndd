@@ -549,6 +549,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         selectedClassId={selectedClassId}
         selectedClass={selectedClass}
         currentWeek={currentWeek}
+        systemConfig={systemConfig}
       />
     </div>
   );

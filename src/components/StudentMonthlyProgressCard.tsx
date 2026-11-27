@@ -1,19 +1,16 @@
 import React, { useMemo } from 'react';
 import { Student, PointRecord } from '../types.ts';
-import { ACADEMIC_MONTHS, AcademicMonthInfo } from '../utils/academicWeeks.ts';
+import { ACADEMIC_MONTHS } from '../utils/academicWeeks.ts';
 import { useTheme } from '../context/ThemeContext.tsx';
+import { MASK_SCORE } from '../utils/privacyMasking.ts';
 import {
-  CalendarDays,
   Trophy,
   TrendingUp,
   TrendingDown,
-  Sparkles,
-  CheckCircle2,
-  Award,
+  Lock,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
-  LineChart,
   Line,
   XAxis,
   YAxis,
@@ -30,6 +27,10 @@ interface StudentMonthlyProgressCardProps {
   records: PointRecord[];
   currentWeek: number;
   shouldHideScores?: boolean;
+  hiddenMonths2_2?: number[];
+  hiddenMonths2_3_2?: number[];
+  hiddenWeeks2_1?: number[];
+  isTeacherOrAdmin?: boolean;
 }
 
 export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProps> = ({
@@ -38,24 +39,41 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
   records,
   currentWeek,
   shouldHideScores = false,
+  hiddenMonths2_2 = [],
+  hiddenMonths2_3_2 = [],
+  hiddenWeeks2_1 = [],
+  isTeacherOrAdmin = false,
 }) => {
   const { isDark } = useTheme();
 
+  const hiddenMonthsSet = useMemo(() => {
+    if (isTeacherOrAdmin) return new Set<number>();
+    return new Set<number>([...hiddenMonths2_2, ...hiddenMonths2_3_2]);
+  }, [isTeacherOrAdmin, hiddenMonths2_2, hiddenMonths2_3_2]);
+
+  const hiddenWeeksSet = useMemo(() => {
+    if (isTeacherOrAdmin) return new Set<number>();
+    return new Set<number>(hiddenWeeks2_1);
+  }, [isTeacherOrAdmin, hiddenWeeks2_1]);
+
   // Compute stats across all academic months for this student and comparison with class
   const monthlyHistory = useMemo(() => {
-    return ACADEMIC_MONTHS.map((monthInfo, idx) => {
+    return ACADEMIC_MONTHS.map((monthInfo) => {
       const monthWeeks = monthInfo.weeks;
-      const monthRecords = records.filter(
-        (r) => monthWeeks.includes(r.week) && r.week <= currentWeek
-      );
+      const visibleMonthWeeks = monthWeeks.filter((w) => w <= currentWeek && !hiddenWeeksSet.has(w));
+      const isMonthHidden = hiddenMonthsSet.has(monthInfo.month) || (monthWeeks.some((w) => w <= currentWeek) && visibleMonthWeeks.length === 0);
+
+      const monthRecords = isMonthHidden
+        ? []
+        : records.filter((r) => visibleMonthWeeks.includes(r.week));
 
       // Student scores in this month
       const stuRecs = monthRecords.filter((r) => r.studentId === student.id || r.studentName === student.name);
       const plus = stuRecs.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
       const minus = stuRecs.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
-      const numWeeksPassed = monthWeeks.filter((w) => w <= currentWeek).length;
+      const numWeeksPassed = visibleMonthWeeks.length;
       const base = student.baseScore ?? 100;
-      const net = (base * numWeeksPassed) + plus - minus;
+      const net = base * numWeeksPassed + plus - minus;
 
       // Class rankings in this month
       const allStuScores = students.map((s) => {
@@ -63,7 +81,7 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
         const p = recs.filter((r) => r.type === 'plus').reduce((sum, r) => sum + r.points, 0);
         const m = recs.filter((r) => r.type === 'minus').reduce((sum, r) => sum + r.points, 0);
         const sBase = s.baseScore ?? 100;
-        const sNet = (sBase * numWeeksPassed) + p - m;
+        const sNet = sBase * numWeeksPassed + p - m;
         return { id: s.id, group: s.group, net: sNet, plus: p, minus: m };
       });
 
@@ -85,7 +103,7 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
 
       // Active status of this month
       const isPastOrCurrent = monthWeeks.some((w) => w <= currentWeek);
-      const hasData = stuRecs.length > 0 || monthRecords.length > 0;
+      const hasData = !isMonthHidden && (stuRecs.length > 0 || monthRecords.length > 0);
 
       return {
         month: monthInfo.month,
@@ -97,23 +115,25 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
         weekRangeText: monthInfo.weekRangeText,
         plus,
         minus,
-        net,
+        net: isMonthHidden ? null : net,
+        rawNet: net,
         classRank,
         groupRank,
-        classAvg,
-        groupAvg,
+        classAvg: isMonthHidden ? null : classAvg,
+        groupAvg: isMonthHidden ? null : groupAvg,
         recordsCount: stuRecs.length,
         isPastOrCurrent,
         hasData,
+        isMonthHidden,
       };
     });
-  }, [student, students, records, currentWeek]);
+  }, [student, students, records, currentWeek, hiddenMonthsSet, hiddenWeeksSet]);
 
   // Add rank delta from previous month
   const enrichedMonthlyHistory = useMemo(() => {
     return monthlyHistory.map((item, idx) => {
       let rankDelta: number | undefined = undefined;
-      if (idx > 0 && monthlyHistory[idx - 1].hasData && item.hasData) {
+      if (idx > 0 && !item.isMonthHidden && !monthlyHistory[idx - 1].isMonthHidden && monthlyHistory[idx - 1].hasData && item.hasData) {
         rankDelta = monthlyHistory[idx - 1].classRank - item.classRank;
       }
       return {
@@ -125,7 +145,7 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
 
   // Only take months that have data or are past/current
   const activeChartMonths = useMemo(() => {
-    return enrichedMonthlyHistory.filter((m) => m.isPastOrCurrent || m.hasData);
+    return enrichedMonthlyHistory.filter((m) => (m.isPastOrCurrent || m.hasData) && !m.isMonthHidden);
   }, [enrichedMonthlyHistory]);
 
   return (
@@ -146,7 +166,17 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
       </div>
 
       {/* Monthly Interactive Chart */}
-      {activeChartMonths.length > 0 && (
+      {shouldHideScores ? (
+        <div className="bg-slate-50/70 dark:bg-slate-800/40 p-6 rounded-2xl border border-slate-200/80 dark:border-slate-800 text-center space-y-2">
+          <Lock className="w-6 h-6 text-slate-400 mx-auto" />
+          <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
+            Biểu đồ xếp hạng theo tháng đang được tạm ẩn
+          </p>
+          <p className="text-[11px] text-slate-400">
+            Chức năng bảo mật bảng điểm đang bật — chỉ Admin và GVCN mới xem được.
+          </p>
+        </div>
+      ) : activeChartMonths.length > 0 && (
         <div className="bg-slate-50/70 dark:bg-slate-800/40 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
@@ -181,11 +211,12 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                 <Area
                   type="monotone"
                   dataKey="net"
-                  name={shouldHideScores ? 'Điểm ròng Học sinh' : `Điểm ròng ${student.name}`}
+                  name={`Điểm ròng ${student.name}`}
                   fill="url(#monthScoreGrad)"
                   stroke="#f59e0b"
                   strokeWidth={3}
                   dot={{ r: 5, fill: '#f59e0b' }}
+                  connectNulls={false}
                 />
                 <Line
                   type="monotone"
@@ -195,15 +226,17 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                   strokeDasharray="4 4"
                   strokeWidth={2}
                   dot={{ r: 3 }}
+                  connectNulls={false}
                 />
                 <Line
                   type="monotone"
                   dataKey="groupAvg"
-                  name={shouldHideScores ? 'ĐTB Tổ' : `ĐTB Tổ ${student.group}`}
+                  name={`ĐTB Tổ ${student.group}`}
                   stroke="#10b981"
                   strokeDasharray="3 3"
                   strokeWidth={2}
                   dot={{ r: 3 }}
+                  connectNulls={false}
                 />
               </ComposedChart>
             </ResponsiveContainer>
@@ -220,6 +253,7 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
               <th className="py-3 px-3 min-w-[130px]">Tuần &amp; Chủ đề thi đua</th>
               <th className="py-3 px-3 text-center text-emerald-600 dark:text-emerald-400">Thưởng (+)</th>
               <th className="py-3 px-3 text-center text-rose-600 dark:text-rose-400">Trừ (-)</th>
+              <th className="py-3 px-3 text-center text-blue-700 dark:text-blue-400 font-bold">Điểm Ròng</th>
               <th className="py-3 px-3 text-center text-amber-700 dark:text-amber-400 font-bold">Hạng Lớp</th>
               <th className="py-3 px-3 text-center">Hạng Tổ {shouldHideScores ? '' : student.group}</th>
               <th className="py-3 px-3 text-center">Biến Động</th>
@@ -229,6 +263,7 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {enrichedMonthlyHistory.map((m) => {
               const isCurrent = m.weeks.includes(currentWeek);
+              const rowHidden = shouldHideScores || m.isMonthHidden;
 
               return (
                 <tr
@@ -257,25 +292,33 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                   </td>
 
                   <td className="py-3 px-3 text-center font-bold text-emerald-600 dark:text-emerald-400">
-                    {shouldHideScores ? (m.hasData ? '???' : '—') : (m.plus > 0 ? `+${m.plus}` : m.hasData ? '0' : '—')}
+                    {rowHidden ? (m.isPastOrCurrent ? MASK_SCORE : '—') : (m.plus > 0 ? `+${m.plus}` : m.hasData ? '0' : '—')}
                   </td>
 
                   <td className="py-3 px-3 text-center font-bold text-rose-600 dark:text-rose-400">
-                    {shouldHideScores ? (m.hasData ? '???' : '—') : (m.minus > 0 ? `-${m.minus}` : m.hasData ? '0' : '—')}
+                    {rowHidden ? (m.isPastOrCurrent ? MASK_SCORE : '—') : (m.minus > 0 ? `-${m.minus}` : m.hasData ? '0' : '—')}
                   </td>
 
                   <td className="py-3 px-3 text-center">
-                    {m.hasData ? (
+                    {rowHidden ? (
+                      m.isPastOrCurrent ? (
+                        <span className="inline-block px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold text-xs">
+                          {m.isMonthHidden && !shouldHideScores ? 'Đang ẩn' : MASK_SCORE}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300 dark:text-slate-600">—</span>
+                      )
+                    ) : m.hasData ? (
                       <span
                         className={`inline-block px-2.5 py-1 rounded-xl font-black text-xs ${
-                          m.net > 0
+                          m.rawNet > 0
                             ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-900 dark:text-emerald-300'
-                            : m.net < 0
+                            : m.rawNet < 0
                             ? 'bg-rose-100 dark:bg-rose-950/80 text-rose-900 dark:text-rose-300'
                             : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                         }`}
                       >
-                        {shouldHideScores ? '???' : (m.net > 0 ? `+${m.net}` : m.net)} {shouldHideScores ? '' : 'đ'}
+                        {m.rawNet > 0 ? `+${m.rawNet}` : m.rawNet} đ
                       </span>
                     ) : (
                       <span className="text-slate-300 dark:text-slate-600">—</span>
@@ -283,10 +326,14 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                   </td>
 
                   <td className="py-3 px-3 text-center">
-                    {m.hasData ? (
-                      shouldHideScores ? (
-                        <span className="text-slate-300 blur-xs">???</span>
-                      ) : m.classRank === 1 ? (
+                    {rowHidden ? (
+                      m.isPastOrCurrent ? (
+                        <span className="text-slate-400 font-bold">{MASK_SCORE}</span>
+                      ) : (
+                        <span className="text-slate-300 dark:text-slate-600">—</span>
+                      )
+                    ) : m.hasData ? (
+                      m.classRank === 1 ? (
                         <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg bg-amber-400 text-amber-950 font-black text-xs">
                           🥇 #1
                         </span>
@@ -303,9 +350,15 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                   </td>
 
                   <td className="py-3 px-3 text-center">
-                    {m.hasData ? (
-                      <span className={`font-semibold ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-slate-700 dark:text-slate-300'}`}>
-                        {shouldHideScores ? '???' : `#${m.groupRank}`}
+                    {rowHidden ? (
+                      m.isPastOrCurrent ? (
+                        <span className="text-slate-400 font-semibold">{MASK_SCORE}</span>
+                      ) : (
+                        <span className="text-slate-300 dark:text-slate-600">—</span>
+                      )
+                    ) : m.hasData ? (
+                      <span className="font-semibold text-slate-700 dark:text-slate-300">
+                        #{m.groupRank}
                       </span>
                     ) : (
                       <span className="text-slate-300 dark:text-slate-600">—</span>
@@ -313,10 +366,14 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                   </td>
 
                   <td className="py-3 px-3 text-center">
-                    {m.rankDelta !== undefined ? (
-                      shouldHideScores ? (
-                        <span className="text-slate-300 blur-[2px]">???</span>
-                      ) : m.rankDelta > 0 ? (
+                    {rowHidden ? (
+                      m.isPastOrCurrent ? (
+                        <span className="text-slate-400 font-semibold">{MASK_SCORE}</span>
+                      ) : (
+                        <span className="text-slate-300 dark:text-slate-600">—</span>
+                      )
+                    ) : m.rankDelta !== undefined ? (
+                      m.rankDelta > 0 ? (
                         <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 font-bold text-xs">
                           <TrendingUp className="w-3.5 h-3.5" />
                           +{m.rankDelta}
@@ -335,12 +392,16 @@ export const StudentMonthlyProgressCard: React.FC<StudentMonthlyProgressCardProp
                   </td>
 
                   <td className="py-3 px-3 text-center">
-                    {m.hasData ? (
-                      shouldHideScores ? (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-400 border border-slate-200">
+                    {rowHidden ? (
+                      m.isPastOrCurrent ? (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-400 border border-slate-200 dark:border-slate-700">
                           Bảo mật
                         </span>
-                      ) : m.classRank <= 5 ? (
+                      ) : (
+                        <span className="text-slate-300 dark:text-slate-600 italic text-[10px]">Chưa diễn ra</span>
+                      )
+                    ) : m.hasData ? (
+                      m.classRank <= 5 ? (
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
                           Xuất sắc (Top 5)
                         </span>

@@ -207,20 +207,22 @@ export const PointHistoryModal: React.FC<PointHistoryModalProps> = ({
         <div className="bg-slate-100/70 px-5 py-2.5 flex items-center justify-between text-xs border-b border-slate-200">
           <div className="flex items-center gap-4">
             <span className="text-emerald-700 font-bold flex items-center gap-1">
-              <Plus className="w-3.5 h-3.5" /> Tổng cộng: {effectiveHideScores ? '???' : `+${totalPlus}đ`}
+              <Plus className="w-3.5 h-3.5" /> Tổng cộng: {effectiveHideScores ? '***' : `+${totalPlus}đ`}
             </span>
             <span className="text-rose-700 font-bold flex items-center gap-1">
-              <Minus className="w-3.5 h-3.5" /> Tổng trừ: {effectiveHideScores ? '???' : `-${totalMinus}đ`}
+              <Minus className="w-3.5 h-3.5" /> Tổng trừ: {effectiveHideScores ? '***' : `-${totalMinus}đ`}
             </span>
           </div>
           <span
             className={`font-black px-2.5 py-0.5 rounded-lg text-xs ${
-              totalScore >= 0
+              effectiveHideScores
+                ? 'bg-slate-200 text-slate-600'
+                : totalScore >= 0
                 ? 'bg-emerald-100 text-emerald-800'
                 : 'bg-rose-100 text-rose-800'
             }`}
           >
-            Hiệu số: {effectiveHideScores ? '???' : (totalScore >= 0 ? `+${totalScore}` : totalScore)} {effectiveHideScores ? '' : 'điểm'}
+            Hiệu số: {effectiveHideScores ? '*** (Bảo mật)' : `${totalScore >= 0 ? `+${totalScore}` : totalScore} điểm`}
           </span>
         </div>
 
@@ -246,7 +248,15 @@ export const PointHistoryModal: React.FC<PointHistoryModalProps> = ({
 
         {/* List */}
         <div className="p-4 overflow-y-auto flex-1 space-y-2.5">
-          {filteredRecords.length === 0 ? (
+          {effectiveHideScores ? (
+            <div className="text-center py-10 px-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+              <Lock className="w-8 h-8 text-slate-400 mx-auto" />
+              <h4 className="text-sm font-black text-slate-700">Chi tiết sự vụ đang được bảo mật</h4>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Dữ liệu điểm thưởng, điểm trừ, lỗi vi phạm và nội dung chi tiết của tuần {currentWeek} đang được tạm ẩn đối với tài khoản này.
+              </p>
+            </div>
+          ) : filteredRecords.length === 0 ? (
             <div className="text-center py-10 text-slate-400 text-xs">
               Chưa có mục cộng / trừ điểm nào trong tuần này.
             </div>
@@ -264,7 +274,7 @@ export const PointHistoryModal: React.FC<PointHistoryModalProps> = ({
                   <div className="flex items-center gap-2 flex-wrap">
                     {!targetStudent && (
                       <span className="font-bold text-xs text-slate-900 dark:text-white bg-white dark:bg-slate-800 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700">
-                        {effectiveHideScores ? 'Học sinh' : r.studentName}
+                        {r.studentName}
                       </span>
                     )}
                     <span className="font-semibold text-xs text-slate-800 dark:text-slate-100">{r.ruleTitle}</span>
@@ -313,7 +323,7 @@ export const PointHistoryModal: React.FC<PointHistoryModalProps> = ({
                   <div className="flex items-center gap-3 text-[11px] text-slate-500 pt-0.5">
                     <span className="flex items-center gap-1">
                       <User className="w-3 h-3 text-slate-400" />
-                      Người nhập: <b className="text-slate-700">{effectiveHideScores ? 'Người quản lý' : r.creatorName}</b>
+                      Người nhập: <b className="text-slate-700">{r.creatorName}</b>
                     </span>
                     <span className="flex items-center gap-1">
                       <Clock className="w-3 h-3 text-slate-400" />
@@ -345,7 +355,7 @@ export const PointHistoryModal: React.FC<PointHistoryModalProps> = ({
                           : 'bg-rose-100 text-rose-800'
                       }`}
                     >
-                      {effectiveHideScores ? '???' : (r.type === 'plus' ? `+${r.points}` : `-${r.points}`)} {effectiveHideScores ? '' : 'đ'}
+                      {r.type === 'plus' ? `+${r.points}` : `-${r.points}`} đ
                     </span>
                   )}
 

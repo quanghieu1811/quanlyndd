@@ -1,8 +1,13 @@
 import React, { useState, useMemo } from 'react';
-import { Student, PointRecord, ReportedErrorType, WeekLockConfig, SchoolClass } from '../types.ts';
+import { Student, PointRecord, ReportedErrorType, WeekLockConfig, SchoolClass, SchoolSystemConfig } from '../types.ts';
 import { createScoreReport, DEFAULT_ACCOUNTS, isWeekLocked } from '../services/db.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { ACADEMIC_WEEKS } from '../utils/academicWeeks.ts';
+import {
+  isGlobalRankingHidden,
+  isWeekHiddenForUser,
+  isMyChildStudent,
+} from '../utils/privacyMasking.ts';
 import {
   AlertTriangle,
   X,
@@ -32,6 +37,7 @@ interface CreateScoreReportModalProps {
   weekLocks?: Record<number, WeekLockConfig>;
   selectedClassId?: string;
   selectedClass?: SchoolClass;
+  systemConfig?: SchoolSystemConfig;
 }
 
 export const CreateScoreReportModal: React.FC<CreateScoreReportModalProps> = ({
@@ -45,8 +51,9 @@ export const CreateScoreReportModal: React.FC<CreateScoreReportModalProps> = ({
   weekLocks = {},
   selectedClassId = '8A1',
   selectedClass,
+  systemConfig,
 }) => {
-  const { currentUser, accounts } = useAuth();
+  const { currentUser, accounts, isTeacherOrAdmin } = useAuth();
 
   const [week, setWeek] = useState<number>(() => currentWeek || 1);
   const [selectedGroup, setSelectedGroup] = useState<number>(() => preselectedStudent?.group || 1);
@@ -113,11 +120,19 @@ export const CreateScoreReportModal: React.FC<CreateScoreReportModalProps> = ({
     return students.find((s) => s.id === selectedStudentId);
   }, [students, selectedStudentId]);
 
-  // Existing records of selected student in this week
+  const hideStudentRecords = useMemo(() => {
+    if (isTeacherOrAdmin) return false;
+    if (isGlobalRankingHidden(systemConfig, isTeacherOrAdmin)) return true;
+    if (isWeekHiddenForUser(week, selectedClass, isTeacherOrAdmin)) return true;
+    if (currentUser?.role === 'phhs' && !isMyChildStudent(currentStudent, currentUser)) return true;
+    return false;
+  }, [isTeacherOrAdmin, systemConfig, week, selectedClass, currentUser, currentStudent]);
+
+  // Existing records of selected student in this week (strictly filtered when privacy applies)
   const studentWeekRecords = useMemo(() => {
-    if (!selectedStudentId) return [];
+    if (!selectedStudentId || hideStudentRecords) return [];
     return records.filter((r) => (r.studentId === selectedStudentId || (currentStudent && r.studentName === currentStudent.name)) && r.week === week);
-  }, [records, selectedStudentId, currentStudent, week]);
+  }, [records, selectedStudentId, currentStudent, week, hideStudentRecords]);
 
   // Corresponding group leader info
   const groupLeaderAccount = useMemo(() => {
@@ -403,23 +418,30 @@ export const CreateScoreReportModal: React.FC<CreateScoreReportModalProps> = ({
                 <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                   4. Chọn bản ghi điểm nghi vấn (Tuần {week}):
                 </label>
-                <select
-                  value={selectedRecordId}
-                  onChange={(e) => setSelectedRecordId(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">
-                    {studentWeekRecords.length === 0
-                      ? 'Chưa có bản ghi nào trong tuần này (hoặc điểm bị thiếu chưa nhập)'
-                      : '-- Chọn một sự vụ cụ thể từ danh sách bên dưới (hoặc để trống) --'}
-                  </option>
-                  {studentWeekRecords.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.type === 'plus' ? '🟢 +' : '🔴 -'}
-                      {r.points}đ • {r.ruleTitle || r.reason} ({r.subject || 'Nề nếp'} - {r.dayOfWeek || 'Trong tuần'})
+                {hideStudentRecords ? (
+                  <div className="px-3 py-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-[11px] font-semibold flex items-center gap-2">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span>Chi tiết các bản ghi điểm Tuần {week} đang được bảo mật. Vui lòng mô tả trực tiếp sai sót ở mục 6 bên dưới.</span>
+                  </div>
+                ) : (
+                  <select
+                    value={selectedRecordId}
+                    onChange={(e) => setSelectedRecordId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">
+                      {studentWeekRecords.length === 0
+                        ? 'Chưa có bản ghi nào trong tuần này (hoặc điểm bị thiếu chưa nhập)'
+                        : '-- Chọn một sự vụ cụ thể từ danh sách bên dưới (hoặc để trống) --'}
                     </option>
-                  ))}
-                </select>
+                    {studentWeekRecords.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.type === 'plus' ? '🟢 +' : '🔴 -'}
+                        {r.points}đ • {r.ruleTitle || r.reason} ({r.subject || 'Nề nếp'} - {r.dayOfWeek || 'Trong tuần'})
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
             )}
 

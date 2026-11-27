@@ -1,7 +1,14 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
-import { Student, PointRecord, NotificationItem, WeekLockConfig, SchoolSystemConfig } from '../types.ts';
+import { Student, PointRecord, NotificationItem, WeekLockConfig, SchoolSystemConfig, SchoolClass } from '../types.ts';
 import { getAcademicWeekInfo, ACADEMIC_WEEKS } from '../utils/academicWeeks.ts';
+import {
+  isGlobalRankingHidden,
+  isWeekHiddenForUser,
+  isMyChildStudent,
+  MASK_SCORE,
+  MASK_STUDENT_NAME,
+} from '../utils/privacyMasking.ts';
 import {
   School,
   Sparkles,
@@ -41,6 +48,7 @@ interface WelcomeViewProps {
   onOpenLogin: () => void;
   systemConfig?: SchoolSystemConfig;
   selectedClassId?: string;
+  selectedClass?: SchoolClass;
 }
 
 export const WelcomeView: React.FC<WelcomeViewProps> = ({
@@ -56,16 +64,23 @@ export const WelcomeView: React.FC<WelcomeViewProps> = ({
   onOpenLogin,
   systemConfig,
   selectedClassId = '8A1',
+  selectedClass,
 }) => {
   const { currentUser, isTeacherOrAdmin } = useAuth();
-  const shouldHideScores = systemConfig?.hideRankingScores && !isTeacherOrAdmin;
+  const resolvedSchoolClass =
+    selectedClass || systemConfig?.classes?.find((c) => c.id === selectedClassId);
+  const currentClass =
+    resolvedSchoolClass || {
+      id: selectedClassId,
+      name: `Lớp ${selectedClassId}`,
+    };
+  const isPhhs = currentUser?.role === 'phhs';
+  const isGlobalHidden = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const isWeekHidden = isWeekHiddenForUser(currentWeek, resolvedSchoolClass, isTeacherOrAdmin);
+  const shouldHideScores = isGlobalHidden || isWeekHidden;
   const weekInfo = getAcademicWeekInfo(currentWeek);
   const weekLock = weekLocks[currentWeek];
   const isLocked = weekLock?.isLocked || false;
-  const currentClass = systemConfig?.classes?.find((c) => c.id === selectedClassId) || {
-    id: selectedClassId,
-    name: `Lớp ${selectedClassId}`,
-  };
 
   // Compute Greeting Time
   const hour = new Date().getHours();
@@ -447,7 +462,37 @@ export const WelcomeView: React.FC<WelcomeViewProps> = ({
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Leading Group Card */}
-            {leadingGroup && (
+            {shouldHideScores ? (
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 flex items-center gap-1">
+                      <Lock className="w-3 h-3" />
+                      Xếp hạng đang tạm ẩn
+                    </span>
+                    <span className="text-xs font-bold text-slate-400">
+                      Tuần {currentWeek}
+                    </span>
+                  </div>
+                  <h4 className="text-xl font-black text-slate-700 dark:text-slate-200 mt-1">
+                    Tổ ???
+                  </h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    Bảng xếp hạng và điểm chi tiết đang được Giáo viên / Quản trị viên tạm ẩn để bảo mật kết quả.
+                  </p>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-slate-400 block">Điểm trung bình (ĐTB):</span>
+                    <span className="text-[10px] text-slate-400">Tổng: {MASK_SCORE}</span>
+                  </div>
+                  <span className="text-xl font-black text-slate-400">
+                    {MASK_SCORE}
+                  </span>
+                </div>
+              </div>
+            ) : leadingGroup && (
               <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-50 to-yellow-100/60 dark:from-amber-950/40 dark:to-slate-900 border border-amber-200 dark:border-amber-800/60 flex flex-col justify-between">
                 <div>
                   <div className="flex items-center justify-between mb-2">
@@ -462,17 +507,17 @@ export const WelcomeView: React.FC<WelcomeViewProps> = ({
                     TỔ {leadingGroup.groupNumber}
                   </h4>
                   <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-                    {leadingGroup.studentCount} HS • Thưởng: {shouldHideScores ? '???' : `+${leadingGroup.plus}đ`} • Trừ: {shouldHideScores ? '???' : `-${leadingGroup.minus}đ`}
+                    {leadingGroup.studentCount} HS • Thưởng: +{leadingGroup.plus}đ • Trừ: -{leadingGroup.minus}đ
                   </p>
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-amber-200/60 dark:border-amber-800/40 flex items-center justify-between">
                   <div>
                     <span className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Điểm trung bình (ĐTB):</span>
-                    <span className="text-[10px] text-slate-400">Tổng: {shouldHideScores ? '???' : (leadingGroup.net > 0 ? `+${leadingGroup.net}đ` : `${leadingGroup.net}đ`)}</span>
+                    <span className="text-[10px] text-slate-400">Tổng: {leadingGroup.net > 0 ? `+${leadingGroup.net}đ` : `${leadingGroup.net}đ`}</span>
                   </div>
                   <span className="text-xl font-black text-amber-700 dark:text-amber-400">
-                    {shouldHideScores ? '???' : (leadingGroup.avg > 0 ? `+${leadingGroup.avg} đ` : `${leadingGroup.avg} đ`)}
+                    {leadingGroup.avg > 0 ? `+${leadingGroup.avg} đ` : `${leadingGroup.avg} đ`}
                   </span>
                 </div>
               </div>
@@ -484,37 +529,55 @@ export const WelcomeView: React.FC<WelcomeViewProps> = ({
                 <span className="text-xs font-black text-slate-700 dark:text-slate-200 block mb-2.5">
                   🌟 Top Học Sinh Xuất Sắc Tuần Này:
                 </span>
-                <div className="space-y-2">
-                  {top3Students.map((stuItem, idx) => (
-                    <div
-                      key={stuItem.student.id}
-                      className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800 text-xs"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`w-5 h-5 rounded-md font-black text-[10px] flex items-center justify-center ${
-                            idx === 0
-                              ? 'bg-amber-400 text-amber-950'
-                              : idx === 1
-                              ? 'bg-slate-300 text-slate-900'
-                              : 'bg-amber-700 text-white'
-                          }`}
+                {shouldHideScores ? (
+                  <div className="py-6 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800 text-center space-y-2">
+                    <Lock className="w-6 h-6 text-slate-400 mx-auto" />
+                    <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                      Bảng vinh danh Top 3 đang được tạm ẩn
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      Chỉ Admin và GVCN mới có thể xem kết quả Tuần {currentWeek}.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {top3Students.map((stuItem, idx) => {
+                      const isChild = isMyChildStudent(stuItem.student, currentUser);
+                      const maskClassmate = isPhhs && !isChild;
+                      return (
+                        <div
+                          key={stuItem.student.id}
+                          className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800 text-xs"
                         >
-                          {idx + 1}
-                        </span>
-                        <div>
-                          <span className={`font-bold ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-slate-800 dark:text-slate-200'} block`}>
-                            {shouldHideScores ? `Học sinh ${idx + 1}` : stuItem.student.name}
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`w-5 h-5 rounded-md font-black text-[10px] flex items-center justify-center ${
+                                idx === 0
+                                  ? 'bg-amber-400 text-amber-950'
+                                  : idx === 1
+                                  ? 'bg-slate-300 text-slate-900'
+                                  : 'bg-amber-700 text-white'
+                              }`}
+                            >
+                              {idx + 1}
+                            </span>
+                            <div>
+                              <span className="font-bold text-slate-800 dark:text-slate-200 block">
+                                {maskClassmate ? MASK_STUDENT_NAME : stuItem.student.name}
+                              </span>
+                              <span className="text-[10px] text-slate-400">
+                                {maskClassmate ? 'Tổ ?' : `Tổ ${stuItem.student.group}`}
+                              </span>
+                            </div>
+                          </div>
+                          <span className={`font-black ${maskClassmate ? 'text-slate-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                            {maskClassmate ? MASK_SCORE : `${stuItem.net > 0 ? `+${stuItem.net}` : stuItem.net}đ`}
                           </span>
-                          <span className="text-[10px] text-slate-400">Tổ {stuItem.student.group}</span>
                         </div>
-                      </div>
-                      <span className={`font-black ${shouldHideScores ? 'text-slate-300 blur-xs' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                        {shouldHideScores ? '???' : `+${stuItem.net}đ`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <button

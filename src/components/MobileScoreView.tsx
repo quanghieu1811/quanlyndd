@@ -44,6 +44,15 @@ import { MailboxView } from './MailboxView.tsx';
 import { ParentSubmissionDeskView } from './ParentSubmissionDeskView.tsx';
 import { StudentConfessionsView } from './StudentConfessionsView.tsx';
 import {
+  MASK_SCORE,
+  MASK_RANK,
+  MASK_STUDENT_NAME,
+  isGlobalRankingHidden,
+  getHiddenWeeksSet,
+  isMonthHidden2_2ForUser,
+  isMyChildStudent,
+} from '../utils/privacyMasking.ts';
+import {
   ResponsiveContainer,
   LineChart,
   Line,
@@ -200,16 +209,18 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   const { mode, isDark, setMode } = useTheme();
 
   const isPhhs = currentUser?.role === 'phhs';
-  const isMyChild = (stu?: Student | null) => {
-    if (!isPhhs || !stu || !currentUser) return false;
-    if (currentUser.studentId && stu.id === currentUser.studentId) return true;
-    if (
-      currentUser.studentName &&
-      stu.name?.trim().toLowerCase() === currentUser.studentName?.trim().toLowerCase()
-    ) {
-      return true;
-    }
-    return false;
+  const isMyChild = (stu?: Student | null) => isMyChildStudent(stu, currentUser);
+
+  const shouldHideGlobal = isGlobalRankingHidden(systemConfig, isTeacherOrAdmin);
+  const hiddenWeeksSet = useMemo(
+    () => getHiddenWeeksSet(selectedClass, isTeacherOrAdmin),
+    [selectedClass, isTeacherOrAdmin]
+  );
+  const isWeekHidden = hiddenWeeksSet.has(currentWeek);
+  const isGroupHidden = (gNum: number) => {
+    if (isTeacherOrAdmin) return false;
+    if (canManageGroup(gNum)) return false;
+    return shouldHideGlobal || isWeekHidden;
   };
 
   const myChild = useMemo(() => {
@@ -256,6 +267,8 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   // Sub-states inside Sổ điểm
   const [groupSearch, setGroupSearch] = useState('');
   const [groupSortMode, setGroupSortMode] = useState<'abc' | 'rank'>('abc');
+  const effectiveGroupSortMode: 'abc' | 'rank' =
+    isGroupHidden(activeGroup) || isPhhs ? 'abc' : groupSortMode;
 
   // Sub-states inside Xếp hạng
   const rankingSubMode: RankingSubMode = useMemo(() => {
@@ -264,10 +277,10 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
       return 'monthly_leaderboard';
     }
     if (activeTab === 'student_progress' && studentProgressSubMode === 'comparison') {
-      return isPhhs ? 'week' : 'comparison';
+      return isPhhs || shouldHideGlobal ? 'week' : 'comparison';
     }
     return 'week';
-  }, [activeTab, studentProgressSubMode, isPhhs]);
+  }, [activeTab, studentProgressSubMode, isPhhs, shouldHideGlobal]);
 
   const [weeklyScope, setWeeklyScope] = useState<'current_week' | 'all_weeks'>('current_week');
   const [selectedMonth, setSelectedMonth] = useState<number>(() =>
@@ -349,13 +362,9 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   const weekInfo = getAcademicWeekInfo(currentWeek);
   const leaderEntryStatus = getGroupLeaderEntryStatus(currentWeekConfig, currentWeek);
 
-  const isWeekHidden = Boolean(selectedClass?.hiddenWeeks2_1?.includes(currentWeek));
-  const shouldHideGlobal = Boolean(systemConfig?.hideRankingScores && !isTeacherOrAdmin);
-  const isGroupHidden = (gNum: number) => {
-    if (isTeacherOrAdmin) return false;
-    if (canManageGroup(gNum)) return false;
-    return shouldHideGlobal || isWeekHidden;
-  };
+  const effectiveMatrixSortBy = shouldHideGlobal || isPhhs ? 'name' : matrixSortBy;
+  const isCurrentMonthHidden =
+    shouldHideGlobal || isMonthHidden2_2ForUser(selectedMonth, selectedClass, isTeacherOrAdmin);
 
   const isLeaderOfActiveGroup = Boolean(
     currentUser && canManageGroup(activeGroup) && !isAllPermitted
@@ -422,7 +431,11 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   // Compute weekly OR cumulative group/student stats for Ranking & Groups
   const computeScopeStats = (scope: 'current_week' | 'all_weeks') => {
     const scopeRecords =
-      scope === 'current_week' ? records.filter((r) => r.week === currentWeek) : records;
+      scope === 'current_week'
+        ? records.filter((r) => r.week === currentWeek)
+        : shouldHideGlobal
+        ? []
+        : records.filter((r) => !hiddenWeeksSet.has(r.week));
 
     const studentRows = students.map((stu) => {
       const stuRecs = scopeRecords.filter(
@@ -579,8 +592,10 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   );
 
   const monthlyData = useMemo(() => {
-    const targetWeeks = activeMonthInfo.weeks.filter((w) => w <= currentWeek);
-    const monthRecords = records.filter((r) => targetWeeks.includes(r.week));
+    const targetWeeks = activeMonthInfo.weeks.filter((w) => w <= currentWeek && !hiddenWeeksSet.has(w));
+    const monthRecords = shouldHideGlobal
+      ? []
+      : records.filter((r) => targetWeeks.includes(r.week));
 
     const groups = [1, 2, 3, 4].map((gNum) => {
       const gStudents = students.filter((s) => s.group === gNum);
@@ -644,7 +659,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
       rankedGroups,
       topStudents: studentList.slice(0, 10),
     };
-  }, [activeMonthInfo, currentWeek, records, students, classBaseScore]);
+  }, [activeMonthInfo, currentWeek, records, students, classBaseScore, hiddenWeeksSet, shouldHideGlobal]);
 
   // Max active week across records & currentWeek
   const maxActiveWeek = useMemo(() => {
@@ -678,14 +693,26 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
     const maxWeek = Math.max(currentWeek, 1);
     const chartData: {
       weekName: string;
-      diemBan: number;
-      diemB: number;
-      tbLop: number;
-      plus: number;
-      minus: number;
+      diemBan: number | null;
+      diemB: number | null;
+      tbLop: number | null;
+      plus: number | null;
+      minus: number | null;
     }[] = [];
 
     for (let w = 1; w <= maxWeek; w++) {
+      if (shouldHideGlobal || hiddenWeeksSet.has(w)) {
+        chartData.push({
+          weekName: `T${w}`,
+          diemBan: null,
+          diemB: null,
+          tbLop: null,
+          plus: null,
+          minus: null,
+        });
+        continue;
+      }
+
       const wRecs = records.filter((r) => r.week === w);
       const stuRecs = wRecs.filter(
         (r) => r.studentId === activePersonalStudent.id || r.studentName === activePersonalStudent.name
@@ -728,7 +755,11 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
       });
     }
 
-    const allStuRecords = records
+    const visibleRecs = shouldHideGlobal
+      ? []
+      : records.filter((r) => !hiddenWeeksSet.has(r.week));
+
+    const allStuRecords = visibleRecs
       .filter(
         (r) => r.studentId === activePersonalStudent.id || r.studentName === activePersonalStudent.name
       )
@@ -743,7 +774,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
 
     const cumList = students
       .map((st) => {
-        const recs = records.filter((r) => r.studentId === st.id || r.studentName === st.name);
+        const recs = visibleRecs.filter((r) => r.studentId === st.id || r.studentName === st.name);
         const p = recs.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
         const m = recs.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
         return { id: st.id, net: (st.baseScore ?? classBaseScore) + p - m, plus: p };
@@ -771,18 +802,38 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
       classRank,
       compareBRank,
     };
-  }, [activePersonalStudent, compareStudentB, records, students, currentWeek, classBaseScore, activityFilter]);
+  }, [
+    activePersonalStudent,
+    compareStudentB,
+    records,
+    students,
+    currentWeek,
+    classBaseScore,
+    activityFilter,
+    shouldHideGlobal,
+    hiddenWeeksSet,
+  ]);
 
   // 35-Week Matrix Dataset
   const matrixData = useMemo(() => {
     const weeks = Array.from({ length: maxActiveWeek }, (_, i) => i + 1);
+    const visibleMatrixRecords = shouldHideGlobal
+      ? []
+      : records.filter((r) => !hiddenWeeksSet.has(r.week));
+
     const rows = students.map((stu) => {
-      const stuRecs = records.filter((r) => r.studentId === stu.id || r.studentName === stu.name);
+      const stuRecs = visibleMatrixRecords.filter(
+        (r) => r.studentId === stu.id || r.studentName === stu.name
+      );
       const totalPlus = stuRecs.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
       const totalMinus = stuRecs.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
       const netScore = (stu.baseScore ?? classBaseScore) + totalPlus - totalMinus;
-      const weeklyNets: Record<number, number> = {};
+      const weeklyNets: Record<number, number | null> = {};
       weeks.forEach((w) => {
+        if (shouldHideGlobal || hiddenWeeksSet.has(w)) {
+          weeklyNets[w] = null;
+          return;
+        }
         const wRecs = stuRecs.filter((r) => r.week === w);
         const wp = wRecs.filter((r) => r.type === 'plus').reduce((s, r) => s + r.points, 0);
         const wm = wRecs.filter((r) => r.type === 'minus').reduce((s, r) => s + r.points, 0);
@@ -800,30 +851,49 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
 
     const filtered = enriched.filter((item) => {
       const matchGroup = matrixGroupFilter === 'all' || item.student.group === matrixGroupFilter;
-      const matchSearch =
-        !matrixSearch.trim() ||
-        item.student.name.toLowerCase().includes(matrixSearch.trim().toLowerCase());
-      return matchGroup && matchSearch;
+      if (!matchGroup) return false;
+      if (!matrixSearch.trim()) return true;
+      if (shouldHideGlobal) return false;
+      if (isPhhs && !isMyChild(item.student)) return false;
+      return item.student.name.toLowerCase().includes(matrixSearch.trim().toLowerCase());
     });
 
     filtered.sort((a, b) => {
-      if (matrixSortBy === 'name') return compareStudentsByUnifiedABC(a.student, b.student);
-      if (matrixSortBy === 'points_desc') return b.netScore - a.netScore || a.classRank - b.classRank;
-      if (matrixSortBy === 'plus_desc') return b.totalPlus - a.totalPlus || b.netScore - a.netScore;
-      if (matrixSortBy === 'minus_desc') return b.totalMinus - a.totalMinus || b.netScore - a.netScore;
+      if (effectiveMatrixSortBy === 'name') return compareStudentsByUnifiedABC(a.student, b.student);
+      if (effectiveMatrixSortBy === 'points_desc') return b.netScore - a.netScore || a.classRank - b.classRank;
+      if (effectiveMatrixSortBy === 'plus_desc') return b.totalPlus - a.totalPlus || b.netScore - a.netScore;
+      if (effectiveMatrixSortBy === 'minus_desc') return b.totalMinus - a.totalMinus || b.netScore - a.netScore;
       return a.classRank - b.classRank;
     });
 
     return { weeks, rows: filtered, allRanked: enriched.sort((a, b) => a.classRank - b.classRank) };
-  }, [students, records, maxActiveWeek, classBaseScore, matrixGroupFilter, matrixSearch, matrixSortBy]);
+  }, [
+    students,
+    records,
+    maxActiveWeek,
+    classBaseScore,
+    matrixGroupFilter,
+    matrixSearch,
+    effectiveMatrixSortBy,
+    shouldHideGlobal,
+    hiddenWeeksSet,
+    isPhhs,
+    currentUser,
+  ]);
 
   const handleExportMatrixCSV = () => {
+    if (shouldHideGlobal) return;
+    const exportList = isPhhs
+      ? matrixData.allRanked.filter((item) => isMyChild(item.student))
+      : matrixData.allRanked;
     const weeksHeader = matrixData.weeks.map((w) => `Tuần ${w}`).join(',');
     const headers = `STT,Họ và tên,Tổ,Giới tính,Chức vụ,${weeksHeader},Tổng điểm cộng (+),Tổng điểm trừ (-),Tổng điểm ròng,Điểm TB/Tuần,Hạng lớp\n`;
-    const rows = matrixData.allRanked
+    const rows = exportList
       .map((item, idx) => {
         const stu = item.student;
-        const weekScores = matrixData.weeks.map((w) => item.weeklyNets[w] ?? 0).join(',');
+        const weekScores = matrixData.weeks
+          .map((w) => (hiddenWeeksSet.has(w) ? 'Bảo mật' : item.weeklyNets[w] ?? 0))
+          .join(',');
         const avg = Number((item.netScore / Math.max(1, maxActiveWeek)).toFixed(2));
         return `${idx + 1},"${stu.name}",Tổ ${stu.group},${stu.gender},"${stu.roleInGroup || 'Thành viên'}",${weekScores},${item.totalPlus},${item.totalMinus},${item.netScore},${avg},${item.classRank}`;
       })
@@ -864,17 +934,16 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   };
 
   const pickerStudents = useMemo(() => {
+    if (shouldHideGlobal) return [];
+    if (isPhhs) return myChild ? [myChild] : [];
     const q = studentPickerQuery.trim().toLowerCase();
     if (!q) return sortedStudentsList;
     return sortedStudentsList.filter((s) => s.name.toLowerCase().includes(q));
-  }, [sortedStudentsList, studentPickerQuery]);
+  }, [sortedStudentsList, studentPickerQuery, shouldHideGlobal, isPhhs, myChild]);
 
-  const isPersonalHidden =
-    activePersonalStudent &&
-    !canManageGroup(activePersonalStudent.group) &&
-    !isTeacherOrAdmin &&
-    (shouldHideGlobal || isWeekHidden) &&
-    !isMyChild(activePersonalStudent);
+  const isPersonalHidden = Boolean(
+    activePersonalStudent && (shouldHideGlobal || (isPhhs && !isMyChild(activePersonalStudent)))
+  );
 
   const summaryA = useMemo(() => computeStudentSummary(activePersonalStudent), [activePersonalStudent, records, classBaseScore]);
   const summaryB = useMemo(() => computeStudentSummary(compareStudentB), [compareStudentB, records, classBaseScore]);
@@ -1049,6 +1118,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                   systemConfig={systemConfig}
                   onOpenSystemSettings={onOpenSystemSettings}
                   selectedClassId={selectedClassId}
+                  selectedClass={selectedClass}
                 />
               )}
 
@@ -1200,46 +1270,61 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       </div>
                       <div className="text-right">
                         <div className="text-2xl font-bold tabular-nums text-blue-700 dark:text-blue-400">
-                          {childWeekRow.total}đ
+                          {shouldHideGlobal || isWeekHidden ? MASK_SCORE : `${childWeekRow.total}đ`}
                         </div>
                         <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                          Hạng #{childWeekRow.rankInGroup} Tổ {myChild.group}
+                          {shouldHideGlobal || isWeekHidden
+                            ? `Hạng #${MASK_RANK}`
+                            : `Hạng #${childWeekRow.rankInGroup} Tổ ${myChild.group}`}
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-2.5 tabular-nums">
-                      <span>Điểm gốc: {childWeekRow.base}</span>
-                      <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
-                        Cộng: +{childWeekRow.plus} ({childWeekRow.plusCount})
-                      </span>
-                      <span className="text-rose-600 dark:text-rose-400 font-semibold">
-                        Trừ: -{childWeekRow.minus} ({childWeekRow.minusCount})
-                      </span>
-                    </div>
-
-                    {childWeekRow.isPenaltyWarning && (
-                      <div className="flex items-center gap-2 text-xs font-semibold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 rounded-xl px-3 py-2">
-                        <AlertTriangle className="w-4 h-4 shrink-0" />
-                        <span>Cảnh báo chép phạt tuần này (trừ trên 6 điểm)</span>
+                    {shouldHideGlobal || isWeekHidden ? (
+                      <div className="flex items-center gap-2 text-xs text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/40 rounded-xl px-3 py-2.5 border border-amber-200 dark:border-amber-800">
+                        <Lock className="w-4 h-4 shrink-0" />
+                        <span>Điểm Tuần {currentWeek} đang được tạm ẩn theo cấu hình lớp.</span>
                       </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-2.5 tabular-nums">
+                          <span>Điểm gốc: {childWeekRow.base}</span>
+                          <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
+                            Cộng: +{childWeekRow.plus} ({childWeekRow.plusCount})
+                          </span>
+                          <span className="text-rose-600 dark:text-rose-400 font-semibold">
+                            Trừ: -{childWeekRow.minus} ({childWeekRow.minusCount})
+                          </span>
+                        </div>
+
+                        {childWeekRow.isPenaltyWarning && (
+                          <div className="flex items-center gap-2 text-xs font-semibold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 rounded-xl px-3 py-2">
+                            <AlertTriangle className="w-4 h-4 shrink-0" />
+                            <span>Cảnh báo chép phạt tuần này (trừ trên 6 điểm)</span>
+                          </div>
+                        )}
+                      </>
                     )}
 
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setDetailStudent(myChild)}
-                        className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-semibold cursor-pointer active:scale-[0.98] transition"
-                      >
-                        Chi tiết tuần {currentWeek}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openStudentInPersonalTab(myChild)}
-                        className="min-h-[44px] rounded-xl bg-blue-600 text-white text-xs font-semibold cursor-pointer active:scale-[0.98] transition"
-                      >
-                        Biểu đồ cả kỳ
-                      </button>
+                    <div className={`grid gap-2 pt-1 ${shouldHideGlobal ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                      {!(shouldHideGlobal || isWeekHidden) && (
+                        <button
+                          type="button"
+                          onClick={() => setDetailStudent(myChild)}
+                          className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-semibold cursor-pointer active:scale-[0.98] transition"
+                        >
+                          Chi tiết tuần {currentWeek}
+                        </button>
+                      )}
+                      {!shouldHideGlobal && (
+                        <button
+                          type="button"
+                          onClick={() => openStudentInPersonalTab(myChild)}
+                          className="min-h-[44px] rounded-xl bg-blue-600 text-white text-xs font-semibold cursor-pointer active:scale-[0.98] transition"
+                        >
+                          Biểu đồ cả kỳ
+                        </button>
+                      )}
                     </div>
                   </section>
                 )}
@@ -1261,7 +1346,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
 
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
                     {weeklyData.rankedGroups.map((g) => {
-                      const hidden = isGroupHidden(g.group);
+                      const hidden = shouldHideGlobal || isWeekHidden;
                       return (
                         <button
                           key={g.group}
@@ -1277,13 +1362,13 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                               Tổ {g.group}
                             </span>
                             <span className="text-xs font-bold tabular-nums text-amber-700 dark:text-amber-400">
-                              {hidden ? 'Ẩn' : `#${g.rank}`}
+                              {hidden ? `#${MASK_RANK}` : `#${g.rank}`}
                             </span>
                           </div>
 
                           <div className="mt-2">
                             <div className="text-2xl font-bold tabular-nums text-blue-700 dark:text-blue-400">
-                              {hidden ? '---' : g.averageScore}
+                              {hidden ? MASK_SCORE : g.averageScore}
                             </div>
                             <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums mt-0.5">
                               {hidden
@@ -1331,10 +1416,10 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                               </span>
                               <div className="min-w-0">
                                 <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                                  {item.student.name}
+                                  {hideForOtherPhhs ? MASK_STUDENT_NAME : item.student.name}
                                 </div>
                                 <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                                  Tổ {item.student.group}
+                                  {hideForOtherPhhs ? 'Tổ ?' : `Tổ ${item.student.group}`}
                                   {!hideForOtherPhhs && (
                                     <>
                                       <span aria-hidden="true"> · </span>
@@ -1347,7 +1432,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
 
                             <div className="flex items-center gap-2 shrink-0">
                               <span className="text-sm font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
-                                {hideForOtherPhhs ? '***' : `${item.total}đ`}
+                                {hideForOtherPhhs ? MASK_SCORE : `${item.total}đ`}
                               </span>
                               {!hideForOtherPhhs && <ChevronRight className="w-4 h-4 text-slate-400" />}
                             </div>
@@ -1402,7 +1487,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       </div>
                     </button>
 
-                    {!isPhhs && (
+                    {!isPhhs && !shouldHideGlobal && (
                       <button
                         type="button"
                         onClick={() => {
@@ -1439,21 +1524,23 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       </div>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('export_results')}
-                      className="min-h-[54px] px-3.5 py-2.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-2.5 text-left cursor-pointer active:scale-[0.98] transition"
-                    >
-                      <Printer className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                          4. In &amp; Báo cáo
+                    {isTeacherOrAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => onNavigateTab('export_results')}
+                        className="min-h-[54px] px-3.5 py-2.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-2.5 text-left cursor-pointer active:scale-[0.98] transition"
+                      >
+                        <Printer className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                            4. In &amp; Báo cáo
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                            Poster A4 &amp; Excel
+                          </div>
                         </div>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                          Poster A4 &amp; Excel
-                        </div>
-                      </div>
-                    </button>
+                      </button>
+                    )}
 
                     <button
                       type="button"
@@ -1579,14 +1666,14 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       ĐTB Tổ {activeGroup}
                     </div>
                     <div className="text-lg font-bold tabular-nums text-blue-700 dark:text-blue-400">
-                      {isGroupHidden(activeGroup) ? '---' : activeGroupStats.averageScore}
+                      {isGroupHidden(activeGroup) ? MASK_SCORE : activeGroupStats.averageScore}
                     </div>
                   </div>
                   <div className="border-x border-slate-100 dark:border-slate-800">
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">Cộng / Trừ</div>
                     <div className="text-sm font-bold tabular-nums mt-0.5">
                       {isGroupHidden(activeGroup) ? (
-                        '---'
+                        MASK_SCORE
                       ) : (
                         <>
                           <span className="text-emerald-700 dark:text-emerald-400">
@@ -1603,7 +1690,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                   <div>
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">Hạng Lớp</div>
                     <div className="text-lg font-bold tabular-nums text-amber-700 dark:text-amber-400">
-                      {isGroupHidden(activeGroup) ? '---' : `#${activeGroupStats.rank}`}
+                      {isGroupHidden(activeGroup) ? `#${MASK_RANK}` : `#${activeGroupStats.rank}`}
                     </div>
                   </div>
                 </section>
@@ -1716,17 +1803,19 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                     </button>
                   ) : null}
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTargetStudentForHistory(null);
-                      setIsHistoryModalOpen(true);
-                    }}
-                    className="min-h-[44px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <History className="w-4 h-4 text-slate-500" />
-                    <span>Lịch sử tổ</span>
-                  </button>
+                  {!isGroupHidden(activeGroup) && !isPhhs && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTargetStudentForHistory(null);
+                        setIsHistoryModalOpen(true);
+                      }}
+                      className="min-h-[44px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <History className="w-4 h-4 text-slate-500" />
+                      <span>Lịch sử tổ</span>
+                    </button>
+                  )}
 
                   <button
                     type="button"
@@ -1746,19 +1835,26 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       type="text"
                       value={groupSearch}
                       onChange={(e) => setGroupSearch(e.target.value)}
-                      placeholder={`Tìm học sinh Tổ ${activeGroup}...`}
-                      className="w-full min-h-[44px] rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 pl-9 pr-3 text-sm outline-none focus:border-blue-500"
+                      disabled={isGroupHidden(activeGroup)}
+                      placeholder={
+                        isGroupHidden(activeGroup)
+                          ? 'Danh sách đang ẩn...'
+                          : `Tìm học sinh Tổ ${activeGroup}...`
+                      }
+                      className="w-full min-h-[44px] rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 pl-9 pr-3 text-sm outline-none focus:border-blue-500 disabled:opacity-60"
                     />
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setGroupSortMode(groupSortMode === 'abc' ? 'rank' : 'abc')}
-                    className="min-h-[44px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <SlidersHorizontal className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                    <span>{groupSortMode === 'abc' ? 'Xếp ABC' : 'Theo Hạng'}</span>
-                  </button>
+                  {!isGroupHidden(activeGroup) && !isPhhs && (
+                    <button
+                      type="button"
+                      onClick={() => setGroupSortMode(groupSortMode === 'abc' ? 'rank' : 'abc')}
+                      className="min-h-[44px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <SlidersHorizontal className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                      <span>{effectiveGroupSortMode === 'abc' ? 'Xếp ABC' : 'Theo Hạng'}</span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Privacy Banner for PHHS */}
@@ -1782,6 +1878,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       const myChildRow = isMyChild(row.student);
                       const hideOtherPhhs = isPhhs && !myChildRow;
                       const hideScore = isGroupHidden(activeGroup);
+                      const maskIdentity = hideOtherPhhs || (hideScore && !myChildRow);
 
                       return (
                         <button
@@ -1801,21 +1898,25 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                                 {index + 1}.
                               </span>
                               <span className="text-sm font-bold text-slate-900 dark:text-white truncate">
-                                {hideScore
-                                  ? `Học sinh #${getStudentCanonicalSTT(row.student)}`
-                                  : row.student.name}
+                                {maskIdentity ? MASK_STUDENT_NAME : row.student.name}
                               </span>
                             </div>
 
                             <div className="pl-7 mt-0.5 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 flex-wrap">
-                              <span>STT #{getStudentCanonicalSTT(row.student)}</span>
-                              {row.student.roleInGroup && row.student.roleInGroup !== 'Thành viên' && (
+                              {!hideOtherPhhs && !hideScore ? (
                                 <>
-                                  <span aria-hidden="true">·</span>
-                                  <span className="text-blue-700 dark:text-blue-400 font-medium">
-                                    {hideScore ? 'Cán sự' : row.student.roleInGroup}
-                                  </span>
+                                  <span>STT #{getStudentCanonicalSTT(row.student)}</span>
+                                  {row.student.roleInGroup && row.student.roleInGroup !== 'Thành viên' && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="text-blue-700 dark:text-blue-400 font-medium">
+                                        {row.student.roleInGroup}
+                                      </span>
+                                    </>
+                                  )}
                                 </>
+                              ) : (
+                                <span>Tổ {row.student.group} · Bảo mật</span>
                               )}
                               {myChildRow && (
                                 <>
@@ -1879,7 +1980,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                 {/* Ranking Sub-mode Switcher */}
                 <div
                   className={`grid gap-1 p-1 bg-slate-200/70 dark:bg-slate-800 rounded-2xl ${
-                    isPhhs ? 'grid-cols-3' : 'grid-cols-4'
+                    isPhhs || shouldHideGlobal ? 'grid-cols-3' : 'grid-cols-4'
                   }`}
                 >
                   <button
@@ -1918,7 +2019,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                   >
                     36 HS Tháng
                   </button>
-                  {!isPhhs && (
+                  {!isPhhs && !shouldHideGlobal && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1990,117 +2091,138 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                     </div>
 
                     {/* 4-Group Ranking */}
-                    <section className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
-                      <div className="px-4 py-3 flex items-center justify-between">
-                        <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                          {weeklyScope === 'current_week'
-                            ? `Xếp hạng 4 Tổ · Tuần ${currentWeek}`
-                            : 'Xếp hạng 4 Tổ · Lũy kế cả kỳ'}
-                        </h2>
-                        <span className="text-xs text-slate-500 dark:text-slate-400">ĐTB / HS</span>
-                      </div>
+                    {(() => {
+                      const effectiveHideWeekly =
+                        shouldHideGlobal || (weeklyScope === 'current_week' && isWeekHidden);
+                      const groupsToRender = effectiveHideWeekly
+                        ? rankingDisplayData.rankedGroups
+                        : rankingDisplayData.sortedGroupsByRank;
+                      const visibleWarnings = effectiveHideWeekly
+                        ? []
+                        : rankingDisplayData.warningStudents.filter(
+                            (item) => !isPhhs || isMyChild(item.student)
+                          );
 
-                      {rankingDisplayData.sortedGroupsByRank.map((g) => {
-                        const hidden = isGroupHidden(g.group);
-                        const maxAvg = Math.max(
-                          ...rankingDisplayData.sortedGroupsByRank.map((x) => Math.abs(x.averageScore)),
-                          1
-                        );
-                        const barPct = hidden
-                          ? 0
-                          : Math.min(100, Math.max(8, Math.round((Math.abs(g.averageScore) / maxAvg) * 100)));
-
-                        return (
-                          <button
-                            key={g.group}
-                            type="button"
-                            onClick={() => {
-                              setActiveGroup(g.group);
-                              onNavigateTab(`group_${g.group}`);
-                            }}
-                            className="w-full px-4 py-3.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 transition cursor-pointer space-y-2"
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="flex items-center gap-2.5">
-                                <span
-                                  className={`w-7 h-7 rounded-lg text-xs font-bold tabular-nums flex items-center justify-center ${
-                                    g.rank === 1
-                                      ? 'bg-amber-400 text-amber-950'
-                                      : g.rank === 2
-                                      ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100'
-                                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
-                                  }`}
-                                >
-                                  #{g.rank}
-                                </span>
-                                <div>
-                                  <div className="text-sm font-bold text-slate-900 dark:text-white">
-                                    Tổ {g.group}
-                                  </div>
-                                  <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                                    {hidden
-                                      ? `${g.studentCount} thành viên`
-                                      : `Tổng ${g.totalScore}đ · +${g.totalPlus} / -${g.totalMinus}`}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="text-lg font-bold tabular-nums text-blue-700 dark:text-blue-400">
-                                {hidden ? '---' : g.averageScore}
-                              </div>
+                      return (
+                        <>
+                          <section className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
+                            <div className="px-4 py-3 flex items-center justify-between">
+                              <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                                {weeklyScope === 'current_week'
+                                  ? `Xếp hạng 4 Tổ · Tuần ${currentWeek}`
+                                  : 'Xếp hạng 4 Tổ · Lũy kế cả kỳ'}
+                              </h2>
+                              <span className="text-xs text-slate-500 dark:text-slate-400">
+                                ĐTB / HS
+                              </span>
                             </div>
 
-                            {!hidden && (
-                              <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full ${
-                                    g.rank === 1 ? 'bg-amber-500' : 'bg-blue-600'
-                                  }`}
-                                  style={{ width: `${barPct}%` }}
-                                />
-                              </div>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </section>
+                            {groupsToRender.map((g) => {
+                              const maxAvg = Math.max(
+                                ...groupsToRender.map((x) => Math.abs(x.averageScore)),
+                                1
+                              );
+                              const barPct = effectiveHideWeekly
+                                ? 0
+                                : Math.min(
+                                    100,
+                                    Math.max(8, Math.round((Math.abs(g.averageScore) / maxAvg) * 100))
+                                  );
 
-                    {/* Warning Students */}
-                    {!shouldHideGlobal && !isWeekHidden && rankingDisplayData.warningStudents.length > 0 && (
-                      <section className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-                        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
-                          <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-                          <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                            Lưu ý rèn luyện ({rankingDisplayData.warningStudents.length})
-                          </h3>
-                        </div>
-                        <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                          {rankingDisplayData.warningStudents
-                            .filter((item) => !isPhhs || isMyChild(item.student))
-                            .map((item) => (
-                              <button
-                                key={item.student.id}
-                                type="button"
-                                onClick={() => setDetailStudent(item.student)}
-                                className="w-full min-h-[52px] px-4 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 cursor-pointer"
-                              >
-                                <div className="min-w-0">
-                                  <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                                    {item.student.name}
+                              return (
+                                <button
+                                  key={g.group}
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveGroup(g.group);
+                                    onNavigateTab(`group_${g.group}`);
+                                  }}
+                                  className="w-full px-4 py-3.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 transition cursor-pointer space-y-2"
+                                >
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="flex items-center gap-2.5">
+                                      <span
+                                        className={`w-7 h-7 rounded-lg text-xs font-bold tabular-nums flex items-center justify-center ${
+                                          effectiveHideWeekly
+                                            ? 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                                            : g.rank === 1
+                                            ? 'bg-amber-400 text-amber-950'
+                                            : g.rank === 2
+                                            ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100'
+                                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                                        }`}
+                                      >
+                                        {effectiveHideWeekly ? `#${MASK_RANK}` : `#${g.rank}`}
+                                      </span>
+                                      <div>
+                                        <div className="text-sm font-bold text-slate-900 dark:text-white">
+                                          Tổ {g.group}
+                                        </div>
+                                        <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                                          {effectiveHideWeekly
+                                            ? `${g.studentCount} thành viên`
+                                            : `Tổng ${g.totalScore}đ · +${g.totalPlus} / -${g.totalMinus}`}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    <div className="text-lg font-bold tabular-nums text-blue-700 dark:text-blue-400">
+                                      {effectiveHideWeekly ? MASK_SCORE : g.averageScore}
+                                    </div>
                                   </div>
-                                  <div className="text-xs text-slate-500 dark:text-slate-400">
-                                    Tổ {item.student.group}
-                                    {item.schoolPenalties.length > 0 ? ' · Có lỗi trường (x2)' : ''}
-                                  </div>
-                                </div>
-                                <span className="text-sm font-bold tabular-nums text-rose-600 dark:text-rose-400 shrink-0">
-                                  -{item.minus}đ
-                                </span>
-                              </button>
-                            ))}
-                        </div>
-                      </section>
-                    )}
+
+                                  {!effectiveHideWeekly && (
+                                    <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                                      <div
+                                        className={`h-full rounded-full ${
+                                          g.rank === 1 ? 'bg-amber-500' : 'bg-blue-600'
+                                        }`}
+                                        style={{ width: `${barPct}%` }}
+                                      />
+                                    </div>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </section>
+
+                          {/* Warning Students */}
+                          {visibleWarnings.length > 0 && (
+                            <section className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+                              <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+                                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                                  Lưu ý rèn luyện ({visibleWarnings.length})
+                                </h3>
+                              </div>
+                              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                                {visibleWarnings.map((item) => (
+                                  <button
+                                    key={item.student.id}
+                                    type="button"
+                                    onClick={() => setDetailStudent(item.student)}
+                                    className="w-full min-h-[52px] px-4 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 cursor-pointer"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                                        {item.student.name}
+                                      </div>
+                                      <div className="text-xs text-slate-500 dark:text-slate-400">
+                                        Tổ {item.student.group}
+                                        {item.schoolPenalties.length > 0 ? ' · Có lỗi trường (x2)' : ''}
+                                      </div>
+                                    </div>
+                                    <span className="text-sm font-bold tabular-nums text-rose-600 dark:text-rose-400 shrink-0">
+                                      -{item.minus}đ
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </section>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -2132,37 +2254,39 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                         <span className="text-xs text-slate-500 dark:text-slate-400">ĐTB / HS</span>
                       </div>
 
-                      {monthlyData.rankedGroups.map((g) => {
-                        const hidden = isGroupHidden(g.group);
-                        return (
-                          <div key={g.group} className="px-4 py-3.5 flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2.5">
-                              <span
-                                className={`w-7 h-7 rounded-lg text-xs font-bold tabular-nums flex items-center justify-center ${
-                                  g.rank === 1
-                                    ? 'bg-amber-400 text-amber-950'
-                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
-                                }`}
-                              >
-                                #{g.rank}
-                              </span>
-                              <div>
-                                <div className="text-sm font-bold text-slate-900 dark:text-white">
-                                  Tổ {g.group}
-                                </div>
-                                <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                                  {hidden
-                                    ? `${g.studentCount} HS`
-                                    : `+${g.totalPlus} / -${g.totalMinus} · Tổng ${g.totalScore}đ`}
-                                </div>
+                      {(isCurrentMonthHidden
+                        ? [...monthlyData.rankedGroups].sort((a, b) => a.group - b.group)
+                        : monthlyData.rankedGroups
+                      ).map((g) => (
+                        <div key={g.group} className="px-4 py-3.5 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              className={`w-7 h-7 rounded-lg text-xs font-bold tabular-nums flex items-center justify-center ${
+                                isCurrentMonthHidden
+                                  ? 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                                  : g.rank === 1
+                                  ? 'bg-amber-400 text-amber-950'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
+                              }`}
+                            >
+                              {isCurrentMonthHidden ? `#${MASK_RANK}` : `#${g.rank}`}
+                            </span>
+                            <div>
+                              <div className="text-sm font-bold text-slate-900 dark:text-white">
+                                Tổ {g.group}
+                              </div>
+                              <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                                {isCurrentMonthHidden
+                                  ? `${g.studentCount} HS`
+                                  : `+${g.totalPlus} / -${g.totalMinus} · Tổng ${g.totalScore}đ`}
                               </div>
                             </div>
-                            <div className="text-lg font-bold tabular-nums text-blue-700 dark:text-blue-400">
-                              {hidden ? '---' : g.averageScore}
-                            </div>
                           </div>
-                        );
-                      })}
+                          <div className="text-lg font-bold tabular-nums text-blue-700 dark:text-blue-400">
+                            {isCurrentMonthHidden ? MASK_SCORE : g.averageScore}
+                          </div>
+                        </div>
+                      ))}
                     </section>
 
                     <section className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
@@ -2172,10 +2296,10 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                         </h3>
                       </div>
 
-                      {shouldHideGlobal ? (
+                      {isCurrentMonthHidden ? (
                         <div className="p-4 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2">
                           <Lock className="w-4 h-4 text-amber-600 shrink-0" />
-                          <span>Bảng xếp hạng tháng đang được tạm ẩn.</span>
+                          <span>Bảng xếp hạng {activeMonthInfo.label} đang được tạm ẩn.</span>
                         </div>
                       ) : (
                         <div className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -2195,16 +2319,16 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                                   </span>
                                   <div className="min-w-0">
                                     <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                                      {item.student.name}
+                                      {hideOther ? MASK_STUDENT_NAME : item.student.name}
                                     </div>
                                     <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                                      Tổ {item.student.group}
+                                      {hideOther ? 'Tổ ?' : `Tổ ${item.student.group}`}
                                       {!hideOther && ` · +${item.plus} / -${item.minus}`}
                                     </div>
                                   </div>
                                 </div>
                                 <span className="text-sm font-bold tabular-nums text-emerald-700 dark:text-emerald-400 shrink-0">
-                                  {hideOther ? '***' : `${item.total}đ`}
+                                  {hideOther ? MASK_SCORE : `${item.total}đ`}
                                 </span>
                               </button>
                             );
@@ -2236,6 +2360,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                 {/* MODE 3.4: HEAD-TO-HEAD COMPARISON */}
                 {rankingSubMode === 'comparison' &&
                   !isPhhs &&
+                  !shouldHideGlobal &&
                   activePersonalStudent &&
                   compareStudentB &&
                   personalStats &&
@@ -2277,100 +2402,94 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                           </button>
                         </div>
 
-                        {shouldHideGlobal ? (
-                          <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
-                            <Lock className="w-4 h-4 shrink-0" />
-                            <span>Điểm đối chiếu đang được tạm ẩn.</span>
+                        <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-xl overflow-hidden text-xs tabular-nums">
+                          <div className="grid grid-cols-3 p-2.5 bg-slate-50 dark:bg-slate-800/60 font-bold text-center">
+                            <span className="text-blue-700 dark:text-blue-400">
+                              {personalStats.totalNet}đ
+                            </span>
+                            <span className="text-slate-500 dark:text-slate-400 font-normal">
+                              Tổng điểm
+                            </span>
+                            <span className="text-purple-700 dark:text-purple-400">
+                              {summaryB.net}đ
+                            </span>
                           </div>
-                        ) : (
-                          <>
-                            <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-xl overflow-hidden text-xs tabular-nums">
-                              <div className="grid grid-cols-3 p-2.5 bg-slate-50 dark:bg-slate-800/60 font-bold text-center">
-                                <span className="text-blue-700 dark:text-blue-400">
-                                  {summaryA.net}đ
-                                </span>
-                                <span className="text-slate-500 dark:text-slate-400 font-normal">
-                                  Tổng điểm
-                                </span>
-                                <span className="text-purple-700 dark:text-purple-400">
-                                  {summaryB.net}đ
-                                </span>
-                              </div>
-                              <div className="grid grid-cols-3 p-2.5 text-center">
-                                <span className="text-emerald-700 dark:text-emerald-400 font-bold">
-                                  +{summaryA.totalPlus}
-                                </span>
-                                <span className="text-slate-500 dark:text-slate-400">Điểm cộng</span>
-                                <span className="text-emerald-700 dark:text-emerald-400 font-bold">
-                                  +{summaryB.totalPlus}
-                                </span>
-                              </div>
-                              <div className="grid grid-cols-3 p-2.5 text-center">
-                                <span className="text-rose-600 dark:text-rose-400 font-bold">
-                                  -{summaryA.totalMinus}
-                                </span>
-                                <span className="text-slate-500 dark:text-slate-400">Điểm trừ</span>
-                                <span className="text-rose-600 dark:text-rose-400 font-bold">
-                                  -{summaryB.totalMinus}
-                                </span>
-                              </div>
-                              <div className="grid grid-cols-3 p-2.5 text-center">
-                                <span className="font-bold">#{personalStats.classRank}</span>
-                                <span className="text-slate-500 dark:text-slate-400">Hạng lớp</span>
-                                <span className="font-bold">#{personalStats.compareBRank}</span>
-                              </div>
-                            </div>
+                          <div className="grid grid-cols-3 p-2.5 text-center">
+                            <span className="text-emerald-700 dark:text-emerald-400 font-bold">
+                              +{personalStats.totalPlus}
+                            </span>
+                            <span className="text-slate-500 dark:text-slate-400">Điểm cộng</span>
+                            <span className="text-emerald-700 dark:text-emerald-400 font-bold">
+                              +{summaryB.totalPlus}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-3 p-2.5 text-center">
+                            <span className="text-rose-600 dark:text-rose-400 font-bold">
+                              -{personalStats.totalMinus}
+                            </span>
+                            <span className="text-slate-500 dark:text-slate-400">Điểm trừ</span>
+                            <span className="text-rose-600 dark:text-rose-400 font-bold">
+                              -{summaryB.totalMinus}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-3 p-2.5 text-center">
+                            <span className="font-bold">#{personalStats.classRank}</span>
+                            <span className="text-slate-500 dark:text-slate-400">Hạng lớp</span>
+                            <span className="font-bold">#{personalStats.compareBRank}</span>
+                          </div>
+                        </div>
 
-                            <div className="h-56 w-full pt-2">
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart
-                                  data={personalStats.chartData}
-                                  margin={{ top: 8, right: 12, left: -20, bottom: 0 }}
-                                >
-                                  <CartesianGrid
-                                    strokeDasharray="3 3"
-                                    stroke={isDark ? '#1e293b' : '#f1f5f9'}
-                                  />
-                                  <XAxis dataKey="weekName" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                                  <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                                  <Tooltip
-                                    contentStyle={{
-                                      backgroundColor: isDark ? '#0f172a' : '#ffffff',
-                                      borderRadius: '12px',
-                                      border: `1px solid ${isDark ? '#1e293b' : '#e2e8f0'}`,
-                                      fontSize: '12px',
-                                    }}
-                                  />
-                                  <Line
-                                    type="monotone"
-                                    dataKey="diemBan"
-                                    name={activePersonalStudent.name}
-                                    stroke="#2563eb"
-                                    strokeWidth={2.5}
-                                    dot={{ r: 3 }}
-                                  />
-                                  <Line
-                                    type="monotone"
-                                    dataKey="diemB"
-                                    name={compareStudentB.name}
-                                    stroke="#9333ea"
-                                    strokeWidth={2.5}
-                                    dot={{ r: 3 }}
-                                  />
-                                  <Line
-                                    type="monotone"
-                                    dataKey="tbLop"
-                                    name="TB Lớp"
-                                    stroke="#94a3b8"
-                                    strokeWidth={1.5}
-                                    strokeDasharray="4 4"
-                                    dot={false}
-                                  />
-                                </LineChart>
-                              </ResponsiveContainer>
-                            </div>
-                          </>
-                        )}
+                        <div className="h-56 w-full pt-2">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart
+                              data={personalStats.chartData}
+                              margin={{ top: 8, right: 12, left: -20, bottom: 0 }}
+                            >
+                              <CartesianGrid
+                                strokeDasharray="3 3"
+                                stroke={isDark ? '#1e293b' : '#f1f5f9'}
+                              />
+                              <XAxis dataKey="weekName" tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                              <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                              <Tooltip
+                                contentStyle={{
+                                  backgroundColor: isDark ? '#0f172a' : '#ffffff',
+                                  borderRadius: '12px',
+                                  border: `1px solid ${isDark ? '#1e293b' : '#e2e8f0'}`,
+                                  fontSize: '12px',
+                                }}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="diemBan"
+                                name={activePersonalStudent.name}
+                                stroke="#2563eb"
+                                strokeWidth={2.5}
+                                dot={{ r: 3 }}
+                                connectNulls={false}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="diemB"
+                                name={compareStudentB.name}
+                                stroke="#9333ea"
+                                strokeWidth={2.5}
+                                dot={{ r: 3 }}
+                                connectNulls={false}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="tbLop"
+                                name="TB Lớp"
+                                stroke="#94a3b8"
+                                strokeWidth={1.5}
+                                strokeDasharray="4 4"
+                                dot={false}
+                                connectNulls={false}
+                              />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
                       </section>
                     </div>
                   )}
@@ -2421,17 +2540,16 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-xs text-slate-500 dark:text-slate-400">
-                            Hồ sơ cá nhân · Tổ {activePersonalStudent.group} · STT #
-                            {getStudentCanonicalSTT(activePersonalStudent)}
+                            {isPersonalHidden
+                              ? 'Hồ sơ cá nhân · Bảo mật'
+                              : `Hồ sơ cá nhân · Tổ ${activePersonalStudent.group} · STT #${getStudentCanonicalSTT(activePersonalStudent)}`}
                           </div>
                           <h2 className="text-lg font-bold text-slate-900 dark:text-white truncate mt-0.5">
-                            {isPersonalHidden
-                              ? `Học sinh #${getStudentCanonicalSTT(activePersonalStudent)}`
-                              : activePersonalStudent.name}
+                            {isPersonalHidden ? MASK_STUDENT_NAME : activePersonalStudent.name}
                           </h2>
                         </div>
 
-                        {!isPhhs && (
+                        {!isPhhs && !shouldHideGlobal && (
                           <button
                             type="button"
                             onClick={() => setPickerTarget('personal')}
@@ -2546,6 +2664,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                                   stroke="#2563eb"
                                   strokeWidth={2.5}
                                   dot={{ r: 3 }}
+                                  connectNulls={false}
                                 />
                                 <Line
                                   type="monotone"
@@ -2555,6 +2674,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                                   strokeWidth={1.5}
                                   strokeDasharray="4 4"
                                   dot={false}
+                                  connectNulls={false}
                                 />
                               </LineChart>
                             ) : (
@@ -2687,8 +2807,9 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                           type="text"
                           value={matrixSearch}
                           onChange={(e) => setMatrixSearch(e.target.value)}
-                          placeholder="Tìm tên trong 36 HS..."
-                          className="w-full min-h-[44px] rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 pl-9 pr-3 text-sm outline-none"
+                          disabled={shouldHideGlobal}
+                          placeholder={shouldHideGlobal ? 'Ma trận đang tạm ẩn...' : 'Tìm tên trong 36 HS...'}
+                          className="w-full min-h-[44px] rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 pl-9 pr-3 text-sm outline-none disabled:opacity-60"
                         />
                       </div>
                       {!shouldHideGlobal && (
@@ -2720,16 +2841,23 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       ))}
 
                       <select
-                        value={matrixSortBy}
+                        value={effectiveMatrixSortBy}
                         onChange={(e) => setMatrixSortBy(e.target.value as typeof matrixSortBy)}
-                        className="min-h-[40px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold outline-none shrink-0"
+                        disabled={shouldHideGlobal || isPhhs}
+                        className="min-h-[40px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold outline-none shrink-0 disabled:opacity-60"
                         aria-label="Sắp xếp ma trận"
                       >
-                        <option value="rank">Theo Hạng</option>
-                        <option value="name">Theo Tên ABC</option>
-                        <option value="points_desc">Tổng điểm giảm</option>
-                        <option value="plus_desc">Điểm cộng cao</option>
-                        <option value="minus_desc">Điểm trừ cao</option>
+                        {shouldHideGlobal || isPhhs ? (
+                          <option value="name">Theo Tên ABC</option>
+                        ) : (
+                          <>
+                            <option value="rank">Theo Hạng</option>
+                            <option value="name">Theo Tên ABC</option>
+                            <option value="points_desc">Tổng điểm giảm</option>
+                            <option value="plus_desc">Điểm cộng cao</option>
+                            <option value="minus_desc">Điểm trừ cao</option>
+                          </>
+                        )}
                       </select>
                     </div>
 
@@ -2757,7 +2885,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                                   key={w}
                                   className="px-2 py-2.5 font-semibold text-center whitespace-nowrap"
                                 >
-                                  T{w}
+                                  T{w}{hiddenWeeksSet.has(w) ? ' 🔒' : ''}
                                 </th>
                               ))}
                             </tr>
@@ -2774,23 +2902,27 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                                   className={hideOther ? 'opacity-70' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50'}
                                 >
                                   <td className="sticky left-0 z-10 bg-white dark:bg-slate-900 px-3 py-2.5 font-bold text-slate-900 dark:text-white whitespace-nowrap border-r border-slate-100 dark:border-slate-800">
-                                    <div>{item.student.name}</div>
+                                    <div>{hideOther ? MASK_STUDENT_NAME : item.student.name}</div>
                                     <div className="text-[10px] font-normal text-slate-500">
-                                      Tổ {item.student.group} · +{item.totalPlus} / -{item.totalMinus}
+                                      {hideOther
+                                        ? 'Tổ ? · Bảo mật'
+                                        : `Tổ ${item.student.group} · +${item.totalPlus} / -${item.totalMinus}`}
                                     </div>
                                   </td>
                                   <td className="px-2.5 py-2.5 text-center font-bold text-amber-700 dark:text-amber-400">
-                                    {hideOther ? '***' : `#${item.classRank}`}
+                                    {hideOther ? `#${MASK_RANK}` : `#${item.classRank}`}
                                   </td>
                                   <td className="px-2.5 py-2.5 text-right font-bold text-blue-700 dark:text-blue-400">
-                                    {hideOther ? '***' : item.netScore}
+                                    {hideOther ? MASK_SCORE : item.netScore}
                                   </td>
                                   {matrixData.weeks.map((w) => (
                                     <td
                                       key={w}
                                       className="px-2 py-2.5 text-center text-slate-700 dark:text-slate-300"
                                     >
-                                      {hideOther ? '-' : item.weeklyNets[w]}
+                                      {hideOther || hiddenWeeksSet.has(w)
+                                        ? MASK_SCORE
+                                        : item.weeklyNets[w]}
                                     </td>
                                   ))}
                                 </tr>
@@ -2872,7 +3004,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
       {/* =================================================================== */}
       {/* BOTTOM SHEET 1: STUDENT WEEK DETAIL                                 */}
       {/* =================================================================== */}
-      {detailStudent && detailRow && (
+      {detailStudent && detailRow && !(isPhhs && !isMyChild(detailStudent)) && (
         <div
           className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-end justify-center"
           onClick={() => setDetailStudent(null)}
@@ -2886,12 +3018,13 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
             <div className="px-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-start justify-between gap-3">
               <div>
                 <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                  Tổ {detailStudent.group} · STT #{getStudentCanonicalSTT(detailStudent)} · Tuần{' '}
-                  {currentWeek}
+                  {isGroupHidden(detailStudent.group) && !isMyChild(detailStudent)
+                    ? `Tổ ${detailStudent.group} · Tuần ${currentWeek} · Bảo mật`
+                    : `Tổ ${detailStudent.group} · STT #${getStudentCanonicalSTT(detailStudent)} · Tuần ${currentWeek}`}
                 </div>
                 <h3 className="text-lg font-bold text-slate-900 dark:text-white mt-0.5">
-                  {isGroupHidden(detailStudent.group)
-                    ? `Học sinh #${getStudentCanonicalSTT(detailStudent)}`
+                  {isGroupHidden(detailStudent.group) && !isMyChild(detailStudent)
+                    ? MASK_STUDENT_NAME
                     : detailStudent.name}
                 </h3>
               </div>
@@ -2996,63 +3129,71 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
               )}
             </div>
 
-            <div className="p-4 border-t border-slate-100 dark:border-slate-800 grid grid-cols-2 gap-2 shrink-0">
-              {canEditGroup(detailStudent.group) && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const st = detailStudent;
-                      setDetailStudent(null);
-                      setActiveGroup(st.group);
-                      setTargetStudentForAdd(st);
-                      setIsAddModalOpen(true);
-                    }}
-                    className="min-h-[48px] rounded-xl bg-blue-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Nhập điểm</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const st = detailStudent;
-                      setDetailStudent(null);
-                      setActiveGroup(st.group);
-                      setTargetStudentForHistory(st);
-                      setIsHistoryModalOpen(true);
-                    }}
-                    className="min-h-[48px] rounded-xl bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <History className="w-4 h-4" />
-                    <span>Xóa / Lịch sử</span>
-                  </button>
-                </>
-              )}
+            {(!isGroupHidden(detailStudent.group) || canEditGroup(detailStudent.group)) && (
+              <div className="p-4 border-t border-slate-100 dark:border-slate-800 grid grid-cols-2 gap-2 shrink-0">
+                {canEditGroup(detailStudent.group) && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const st = detailStudent;
+                        setDetailStudent(null);
+                        setActiveGroup(st.group);
+                        setTargetStudentForAdd(st);
+                        setIsAddModalOpen(true);
+                      }}
+                      className="min-h-[48px] rounded-xl bg-blue-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Nhập điểm</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const st = detailStudent;
+                        setDetailStudent(null);
+                        setActiveGroup(st.group);
+                        setTargetStudentForHistory(st);
+                        setIsHistoryModalOpen(true);
+                      }}
+                      className="min-h-[48px] rounded-xl bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <History className="w-4 h-4" />
+                      <span>Xóa / Lịch sử</span>
+                    </button>
+                  </>
+                )}
 
-              <button
-                type="button"
-                onClick={() => openStudentInPersonalTab(detailStudent)}
-                className="min-h-[48px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <TrendingUp className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Tiến trình cả kỳ</span>
-              </button>
+                {!shouldHideGlobal && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => openStudentInPersonalTab(detailStudent)}
+                      className="min-h-[48px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <TrendingUp className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                      <span>Tiến trình cả kỳ</span>
+                    </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  const st = detailStudent;
-                  setDetailStudent(null);
-                  setTargetStudentForReport(st);
-                  setIsReportModalOpen(true);
-                }}
-                className="min-h-[48px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Flag className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-                <span>Báo sai điểm</span>
-              </button>
-            </div>
+                    {!isGroupHidden(detailStudent.group) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const st = detailStudent;
+                          setDetailStudent(null);
+                          setTargetStudentForReport(st);
+                          setIsReportModalOpen(true);
+                        }}
+                        className="min-h-[48px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Flag className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+                        <span>Báo sai điểm</span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3116,7 +3257,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
       {/* =================================================================== */}
       {/* BOTTOM SHEET 3: STUDENT PICKER (PERSONAL / COMPARISON A / B)        */}
       {/* =================================================================== */}
-      {pickerTarget && (
+      {pickerTarget && !isPhhs && !shouldHideGlobal && (
         <div
           className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-end justify-center"
           onClick={() => setPickerTarget(null)}
@@ -3555,7 +3696,10 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
         isLocked={isLocked}
         weekLockConfig={currentWeekConfig}
         activeSupplementalGrant={activeSupplementalGrant}
-        shouldHideScores={isGroupHidden(activeGroup)}
+        shouldHideScores={
+          isGroupHidden(activeGroup) ||
+          (isPhhs && (!targetStudentForHistory || !isMyChild(targetStudentForHistory)))
+        }
         onOpenReportError={(stu) => {
           setIsHistoryModalOpen(false);
           setTargetStudentForReport(stu);
