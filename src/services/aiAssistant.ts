@@ -12,6 +12,7 @@ import {
   MASK_STUDENT_NAME,
 } from '../utils/privacyMasking.ts';
 import { ACADEMIC_MONTHS } from '../utils/academicWeeks.ts';
+import { getInMemoryBearerToken } from '../utils/sessionTokenStore.ts';
 
 function normalizeViText(input?: string | null): string {
   return (input || '')
@@ -1404,11 +1405,16 @@ export async function sendAiAssistantMessage(
 
   let response: Response;
   try {
+    const bearerToken = getInMemoryBearerToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (bearerToken) {
+      headers.Authorization = `Bearer ${bearerToken}`;
+    }
     response = await fetch('/api/ai-assistant', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         message,
         history: formattedHistory,

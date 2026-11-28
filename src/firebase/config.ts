@@ -1,9 +1,12 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
+import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore, Firestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfigData from '../../firebase-applet-config.json';
 
 const env: Record<string, string | undefined> =
   import.meta.env || (typeof process !== 'undefined' ? process.env : {}) || {};
+
+export const ADMIN_EMAIL = 'quanghieun370@gmail.com';
 
 export const firebaseConfig = {
   apiKey: env.VITE_FIREBASE_API_KEY || env.FIREBASE_API_KEY || firebaseConfigData.apiKey || '',
@@ -23,6 +26,11 @@ export const firebaseDatabaseId: string =
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
+// Initialize Firebase Authentication
+export const auth = getAuth(app);
+export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
+
 // Initialize Firestore with specific databaseId if provided
 export const db: Firestore = firebaseDatabaseId
   ? getFirestore(app, firebaseDatabaseId)
@@ -32,7 +40,7 @@ export const db: Firestore = firebaseDatabaseId
 async function testConnection() {
   if (typeof window === 'undefined') return;
   try {
-    await getDocFromServer(doc(db, 'system_settings', 'config'));
+    await getDocFromServer(doc(db, 'system_settings', 'school_config'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration.');

@@ -19,15 +19,14 @@
     },
     "AccountCredential": {
       "title": "AccountCredential",
-      "description": "Kho lưu trữ thông tin băm mật khẩu bảo mật (nghiêm cấm đọc/ghi công khai)",
+      "description": "Kho lưu trữ thông tin băm mật khẩu bảo mật (chỉ Admin xác thực Google mới có quyền ghi; tuyệt đối cấm đọc/ghi công khai tài khoản admin)",
       "type": "object",
       "properties": {
-        "username": { "type": "string" },
-        "hash": { "type": "string" },
-        "salt": { "type": "string" },
+        "username": { "type": "string", "maxLength": 128 },
+        "hash": { "type": "string", "maxLength": 128 },
+        "salt": { "type": "string", "maxLength": 128 },
         "iterations": { "type": "number" },
-        "_systemAuthKey": { "type": "string" },
-        "updatedAt": { "type": "string" }
+        "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["username", "hash", "salt"]
     },

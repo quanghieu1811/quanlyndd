@@ -14,7 +14,7 @@ import {
   onSnapshot,
   writeBatch,
 } from 'firebase/firestore';
-import { db } from '../firebase/config.ts';
+import { db, auth, ADMIN_EMAIL } from '../firebase/config.ts';
 import {
   UserAccount,
   Student,
@@ -79,13 +79,34 @@ export interface FirestoreErrorInfo {
     emailVerified?: boolean | null;
     isAnonymous?: boolean | null;
     tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
   };
 }
 
+export function isFirebaseAdminSignedIn(): boolean {
+  const user = auth?.currentUser;
+  return Boolean(user && user.emailVerified && user.email === ADMIN_EMAIL);
+}
+
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): void {
+  const user = auth?.currentUser;
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
-    authInfo: {},
+    authInfo: {
+      userId: user?.uid || null,
+      email: user?.email || null,
+      emailVerified: user?.emailVerified ?? null,
+      isAnonymous: user?.isAnonymous ?? null,
+      tenantId: user?.tenantId || null,
+      providerInfo:
+        user?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || [],
+    },
     operationType,
     path,
   };
@@ -215,45 +236,47 @@ export async function initializeDatabase(): Promise<void> {
       console.warn('System settings init error:', cfgErr);
     }
 
-    // 1. Check existing accounts in Firestore.
+    // 1. Check existing accounts in Firestore. Only verified Firebase Admin can write accounts.
     const accSnap = await getDocs(collection(db, ACCOUNTS_COLL));
-    if (accSnap.empty) {
-      for (const acc of DEFAULT_ACCOUNTS) {
-        await setDoc(doc(db, ACCOUNTS_COLL, acc.username), {
-          ...acc,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    } else {
-      // Sync metadata without touching custom passwords
-      for (const acc of DEFAULT_ACCOUNTS) {
-        const existingDoc = accSnap.docs.find((d) => d.id === acc.username);
-        if (existingDoc) {
-          const existingData = existingDoc.data();
-          const updates: Record<string, any> = {};
-          if (existingData.displayName !== acc.displayName) {
-            updates.displayName = acc.displayName;
-          }
-          if (existingData.role !== acc.role) {
-            updates.role = acc.role;
-          }
-          if (existingData.assignedGroup !== acc.assignedGroup) {
-            updates.assignedGroup = acc.assignedGroup;
-          }
-          if (existingData.password && OLD_DEFAULT_PASSWORDS.includes(existingData.password)) {
-            updates.password = deleteField();
-          }
-          if (Object.keys(updates).length > 0) {
-            await updateDoc(doc(db, ACCOUNTS_COLL, acc.username), {
-              ...updates,
-              updatedAt: new Date().toISOString(),
-            });
-          }
-        } else {
+    if (isFirebaseAdminSignedIn()) {
+      if (accSnap.empty) {
+        for (const acc of DEFAULT_ACCOUNTS) {
           await setDoc(doc(db, ACCOUNTS_COLL, acc.username), {
             ...acc,
             updatedAt: new Date().toISOString(),
           });
+        }
+      } else {
+        // Sync metadata without touching custom passwords
+        for (const acc of DEFAULT_ACCOUNTS) {
+          const existingDoc = accSnap.docs.find((d) => d.id === acc.username);
+          if (existingDoc) {
+            const existingData = existingDoc.data();
+            const updates: Record<string, any> = {};
+            if (existingData.displayName !== acc.displayName) {
+              updates.displayName = acc.displayName;
+            }
+            if (existingData.role !== acc.role) {
+              updates.role = acc.role;
+            }
+            if (existingData.assignedGroup !== acc.assignedGroup) {
+              updates.assignedGroup = acc.assignedGroup;
+            }
+            if (existingData.password && OLD_DEFAULT_PASSWORDS.includes(existingData.password)) {
+              updates.password = deleteField();
+            }
+            if (Object.keys(updates).length > 0) {
+              await updateDoc(doc(db, ACCOUNTS_COLL, acc.username), {
+                ...updates,
+                updatedAt: new Date().toISOString(),
+              });
+            }
+          } else {
+            await setDoc(doc(db, ACCOUNTS_COLL, acc.username), {
+              ...acc,
+              updatedAt: new Date().toISOString(),
+            });
+          }
         }
       }
     }
@@ -301,61 +324,63 @@ export async function initializeDatabase(): Promise<void> {
       }
     }
 
-    // 2b. Auto-provision/sync PHHS accounts for all students
-    const allSchoolStudents = getAllSchoolStudents();
-    const studentsForPhhsSync = currentStudentsList.length > 0 ? currentStudentsList : allSchoolStudents;
-    
-    for (const stu of studentsForPhhsSync) {
-      const classId = stu.classId || '8A1';
-      const phhsUsername = studentNameToUsername(stu.name, classId);
-      if (!phhsUsername) continue;
-      
-      const existingDoc = accSnap.docs.find(
-        (d) => d.id.toLowerCase() === phhsUsername.toLowerCase()
-      );
-      
-      if (!existingDoc) {
-        await setDoc(doc(db, ACCOUNTS_COLL, phhsUsername), {
-          username: phhsUsername,
-          displayName: `PHHS em ${stu.name} (${classId})`,
-          role: 'phhs',
-          assignedGroup: stu.group,
-          classId,
-          studentId: stu.id,
-          studentName: stu.name,
-          studentSTT: stu.stt,
-          updatedAt: new Date().toISOString(),
-        });
-        
-        const credRef = doc(db, ACCOUNT_CREDENTIALS_COLL, phhsUsername);
-        const credSnap = await getDoc(credRef);
-        if (!credSnap.exists()) {
-          const salt = generateSalt();
-          const hash = await hashPassword('12345678', salt);
-          await setDoc(credRef, {
+    // 2b. Auto-provision/sync PHHS accounts & credentials ONLY when signed in as verified Firebase Admin
+    if (isFirebaseAdminSignedIn()) {
+      const allSchoolStudents = getAllSchoolStudents();
+      const studentsForPhhsSync = currentStudentsList.length > 0 ? currentStudentsList : allSchoolStudents;
+
+      for (const stu of studentsForPhhsSync) {
+        const classId = stu.classId || '8A1';
+        const phhsUsername = studentNameToUsername(stu.name, classId);
+        if (!phhsUsername) continue;
+
+        const existingDoc = accSnap.docs.find(
+          (d) => d.id.toLowerCase() === phhsUsername.toLowerCase()
+        );
+
+        if (!existingDoc) {
+          await setDoc(doc(db, ACCOUNTS_COLL, phhsUsername), {
             username: phhsUsername,
-            hash,
-            salt,
-            iterations: 100000,
+            displayName: `PHHS em ${stu.name} (${classId})`,
+            role: 'phhs',
+            assignedGroup: stu.group,
+            classId,
+            studentId: stu.id,
+            studentName: stu.name,
+            studentSTT: stu.stt,
             updatedAt: new Date().toISOString(),
           });
-        }
-      } else {
-        const existingData = existingDoc.data();
-        const updates: Record<string, any> = {};
-        if (existingData.studentId !== stu.id) updates.studentId = stu.id;
-        if (existingData.studentName !== stu.name) updates.studentName = stu.name;
-        if (existingData.studentSTT !== stu.stt) updates.studentSTT = stu.stt;
-        if (existingData.assignedGroup !== stu.group) updates.assignedGroup = stu.group;
-        if (existingData.classId !== classId) updates.classId = classId;
-        if (existingData.role !== 'phhs') updates.role = 'phhs';
-        if (existingData.password) updates.password = deleteField();
-        
-        if (Object.keys(updates).length > 0) {
-          await updateDoc(doc(db, ACCOUNTS_COLL, existingDoc.id), {
-            ...updates,
-            updatedAt: new Date().toISOString(),
-          });
+
+          const credRef = doc(db, ACCOUNT_CREDENTIALS_COLL, phhsUsername);
+          const credSnap = await getDoc(credRef);
+          if (!credSnap.exists()) {
+            const salt = generateSalt();
+            const hash = await hashPassword('12345678', salt);
+            await setDoc(credRef, {
+              username: phhsUsername,
+              hash,
+              salt,
+              iterations: 100000,
+              updatedAt: new Date().toISOString(),
+            });
+          }
+        } else {
+          const existingData = existingDoc.data();
+          const updates: Record<string, any> = {};
+          if (existingData.studentId !== stu.id) updates.studentId = stu.id;
+          if (existingData.studentName !== stu.name) updates.studentName = stu.name;
+          if (existingData.studentSTT !== stu.stt) updates.studentSTT = stu.stt;
+          if (existingData.assignedGroup !== stu.group) updates.assignedGroup = stu.group;
+          if (existingData.classId !== classId) updates.classId = classId;
+          if (existingData.role !== 'phhs') updates.role = 'phhs';
+          if (existingData.password) updates.password = deleteField();
+
+          if (Object.keys(updates).length > 0) {
+            await updateDoc(doc(db, ACCOUNTS_COLL, existingDoc.id), {
+              ...updates,
+              updatedAt: new Date().toISOString(),
+            });
+          }
         }
       }
     }
@@ -470,8 +495,8 @@ export async function getAccounts(): Promise<UserAccount[]> {
 }
 
 /**
- * Safely verifies account credentials using PBKDF2 hash & salt.
- * No plaintext passwords are ever exposed or loaded in bulk.
+ * Safely verifies non-admin account credentials using PBKDF2 hash & salt.
+ * Admin authentication NEVER runs on the client and NEVER falls back to hardcoded defaults.
  */
 export async function verifyAccountCredentials(
   username: string,
@@ -483,8 +508,16 @@ export async function verifyAccountCredentials(
     return { success: false, message: 'Vui lòng nhập tên đăng nhập và mật khẩu.' };
   }
 
+  // Strictly block client-side admin verification or hardcoded fallback
+  if (cleanUser.toLowerCase() === 'admin') {
+    return {
+      success: false,
+      message: 'Tài khoản Admin phải xác thực qua máy chủ hoặc Google.',
+    };
+  }
+
   try {
-    // 1. Look up in secure account_credentials collection
+    // 1. Look up in secure account_credentials collection (non-admin accounts only)
     let credDoc = await getDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser));
     if (!credDoc.exists()) {
       credDoc = await getDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser.toLowerCase()));
@@ -499,7 +532,7 @@ export async function verifyAccountCredentials(
       return { success: false, message: 'Mật khẩu không chính xác.' };
     }
 
-    // 2. Legacy fallback check (if credential hasn't been migrated yet)
+    // 2. Legacy initial check only if credential doc does not exist yet
     let accDoc = await getDoc(doc(db, ACCOUNTS_COLL, cleanUser));
     if (!accDoc.exists()) {
       accDoc = await getDoc(doc(db, ACCOUNTS_COLL, cleanUser.toLowerCase()));
@@ -507,104 +540,74 @@ export async function verifyAccountCredentials(
 
     if (accDoc.exists()) {
       const accData = accDoc.data();
+      if (accData.role === 'admin') {
+        return { success: false, message: 'Tài khoản Admin phải xác thực qua máy chủ hoặc Google.' };
+      }
       const legacyPass = accData.password;
       const isLegacyValid =
-        legacyPass === cleanPass ||
-        (!legacyPass && (cleanPass === '12345678' || cleanPass === '123456'));
+        (typeof legacyPass === 'string' && legacyPass === cleanPass) ||
+        (!legacyPass && cleanPass === '12345678');
 
       if (isLegacyValid) {
-        // Auto-upgrade to secure PBKDF2 hash and wipe plaintext password
-        const salt = generateSalt();
-        const hash = await hashPassword(cleanPass, salt);
-        await setDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser), {
-          username: cleanUser,
-          hash,
-          salt,
-          iterations: 100000,
-          updatedAt: new Date().toISOString(),
-        });
-        await updateDoc(doc(db, ACCOUNTS_COLL, accDoc.id), {
-          password: deleteField(),
-        });
         return { success: true };
       }
       return { success: false, message: 'Mật khẩu không chính xác.' };
     }
 
-    // 3. Fallback for built-in accounts in offline mode
-    const defaultAcc = DEFAULT_ACCOUNTS.find(
-      (a) => a.username.toLowerCase() === cleanUser.toLowerCase()
-    );
-    if (defaultAcc && (cleanPass === '12345678' || cleanPass === '123456')) {
-      return { success: true };
-    }
-
     return { success: false, message: 'Tài khoản không tồn tại trên hệ thống.' };
   } catch (err) {
     console.error('Error verifying account credentials:', err);
-    const defaultAcc = DEFAULT_ACCOUNTS.find(
-      (a) => a.username.toLowerCase() === cleanUser.toLowerCase()
-    );
-    if (defaultAcc && (cleanPass === '12345678' || cleanPass === '123456')) {
-      return { success: true };
-    }
     return { success: false, message: 'Lỗi xác thực. Vui lòng thử lại.' };
   }
 }
 
 /**
- * Updates password securely with PBKDF2 hash & salt. Never saves plaintext password in Firestore.
+ * Updates non-admin password in Firestore ONLY when signed in as verified Firebase Admin.
+ * Unauthenticated clients and non-admin callers are strictly rejected by Firestore Security Rules.
  */
 export async function updateAccountPassword(username: string, newPassword: string): Promise<boolean> {
   const cleanUser = username.trim();
   const cleanPass = newPassword.trim();
   if (!cleanUser || cleanPass.length < 6) return false;
 
+  if (!isFirebaseAdminSignedIn()) {
+    return false;
+  }
+
   try {
     const salt = generateSalt();
     const hash = await hashPassword(cleanPass, salt);
-    const credData = {
+    const now = new Date().toISOString();
+
+    await setDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser), {
       username: cleanUser,
       hash,
       salt,
       iterations: 100000,
-      updatedAt: new Date().toISOString(),
-    };
+      updatedAt: now,
+    });
 
-    // Save to account_credentials
-    try {
-      await setDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser), credData);
-      if (cleanUser.toLowerCase() !== cleanUser) {
-        await setDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser.toLowerCase()), credData);
-      }
-    } catch (credErr) {
-      handleFirestoreError(credErr, OperationType.WRITE, `${ACCOUNT_CREDENTIALS_COLL}/${cleanUser}`);
-      // Retry with setDoc merge
-      await setDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser), credData, { merge: true });
+    if (cleanUser.toLowerCase() !== cleanUser) {
+      await setDoc(doc(db, ACCOUNT_CREDENTIALS_COLL, cleanUser.toLowerCase()), {
+        username: cleanUser.toLowerCase(),
+        hash,
+        salt,
+        iterations: 100000,
+        updatedAt: now,
+      });
     }
 
     // Clean up any plaintext password field in accounts collection if doc exists
     try {
       const accRef = doc(db, ACCOUNTS_COLL, cleanUser);
       const accSnap = await getDoc(accRef);
-      if (accSnap.exists()) {
+      if (accSnap.exists() && accSnap.data()?.password) {
         await updateDoc(accRef, {
           password: deleteField(),
-          updatedAt: new Date().toISOString(),
+          updatedAt: now,
         });
       }
-    } catch (accErr) {
-      try {
-        const lowerRef = doc(db, ACCOUNTS_COLL, cleanUser.toLowerCase());
-        const lowerSnap = await getDoc(lowerRef);
-        if (lowerSnap.exists()) {
-          await updateDoc(lowerRef, {
-            password: deleteField(),
-            updatedAt: new Date().toISOString(),
-          });
-        }
-      } catch (_) {}
-    }
+    } catch (_) {}
 
     return true;
   } catch (error) {
@@ -2852,6 +2855,10 @@ export async function ensureClassCadreAccounts(cls: SchoolClass): Promise<void> 
       classId,
     },
   ];
+
+  if (!isFirebaseAdminSignedIn()) {
+    return;
+  }
 
   for (const acc of accountsToCreateOrSync) {
     try {

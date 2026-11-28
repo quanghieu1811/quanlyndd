@@ -1,8 +1,190 @@
 import express, { NextFunction, Request, Response } from 'express';
 import dotenv from 'dotenv';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { GoogleGenAI } from '@google/genai';
+import { initializeApp, getApps } from 'firebase/app';
+import { getFirestore, doc, getDoc, collection, getDocs } from 'firebase/firestore';
 
 dotenv.config();
+
+const ADMIN_EMAIL = 'quanghieun370@gmail.com';
+const SESSION_SECRET = process.env.SESSION_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface ServerAdminCred {
+  hash: string;
+  salt: string;
+}
+
+// One-time in-memory claimed admin password hash when process.env.ADMIN_PASSWORD is unset
+let claimedAdminCred: ServerAdminCred | null = null;
+
+function getConfiguredAdminPassword(): string {
+  return process.env.ADMIN_PASSWORD?.trim() || '';
+}
+
+function loadFirebaseConfigForServer() {
+  let fileCfg: Record<string, any> = {};
+  try {
+    const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(cfgPath)) {
+      fileCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    }
+  } catch {
+    // Ignore file read errors
+  }
+
+  return {
+    firebaseConfig: {
+      apiKey: process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || fileCfg.apiKey || '',
+      authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN || process.env.FIREBASE_AUTH_DOMAIN || fileCfg.authDomain || '',
+      projectId: process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || fileCfg.projectId || '',
+      storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET || process.env.FIREBASE_STORAGE_BUCKET || fileCfg.storageBucket || '',
+      messagingSenderId:
+        process.env.VITE_FIREBASE_MESSAGING_SENDER_ID || process.env.FIREBASE_MESSAGING_SENDER_ID || fileCfg.messagingSenderId || '',
+      appId: process.env.VITE_FIREBASE_APP_ID || process.env.FIREBASE_APP_ID || fileCfg.appId || '',
+    },
+    databaseId:
+      process.env.VITE_FIREBASE_DATABASE_ID || process.env.FIREBASE_DATABASE_ID || fileCfg.firestoreDatabaseId || '',
+  };
+}
+
+let serverFirestoreDb: ReturnType<typeof getFirestore> | null = null;
+function getServerFirestoreDb() {
+  if (serverFirestoreDb) return serverFirestoreDb;
+  const { firebaseConfig, databaseId } = loadFirebaseConfigForServer();
+  const appName = 'server-auth-verifier';
+  const appInstance =
+    getApps().find((a) => a.name === appName) || initializeApp(firebaseConfig, appName);
+  serverFirestoreDb = databaseId ? getFirestore(appInstance, databaseId) : getFirestore(appInstance);
+  return serverFirestoreDb;
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function hashScryptPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function verifyPbkdf2Sha256(password: string, storedHash: string, salt: string, iterations = 100000): boolean {
+  if (!password || !storedHash || !salt) return false;
+  const derived = crypto.pbkdf2Sync(password, salt, iterations, 32, 'sha256').toString('hex');
+  return timingSafeStringEqual(derived, storedHash);
+}
+
+interface ServerSessionPayload {
+  username: string;
+  role: string;
+  authMethod?: 'password' | 'google';
+  displayName?: string;
+  classId?: string;
+  assignedGroup?: number;
+  studentId?: string;
+  studentName?: string;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+function signServerToken(user: Omit<ServerSessionPayload, 'issuedAt' | 'expiresAt'>): string {
+  const now = Date.now();
+  const payload: ServerSessionPayload = {
+    ...user,
+    issuedAt: now,
+    expiresAt: now + SESSION_TTL_MS,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifyServerToken(token?: string | null): ServerSessionPayload | null {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payloadB64, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payloadB64).digest('base64url');
+  if (!timingSafeStringEqual(sig, expectedSig)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8')) as ServerSessionPayload;
+    if (!parsed.username || !parsed.role || typeof parsed.expiresAt !== 'number') return null;
+    if (Date.now() > parsed.expiresAt) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function extractBearerToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || typeof authHeader !== 'string') return null;
+  if (!authHeader.startsWith('Bearer ')) return null;
+  return authHeader.slice(7).trim() || null;
+}
+
+let cachedGoogleCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
+async function getFirebasePublicCerts(): Promise<Record<string, string>> {
+  if (cachedGoogleCerts && Date.now() < cachedGoogleCerts.expiresAt) {
+    return cachedGoogleCerts.certs;
+  }
+  const resp = await fetch(
+    'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+  );
+  if (!resp.ok) {
+    throw new Error('Failed to fetch Firebase public certificates.');
+  }
+  const certs = (await resp.json()) as Record<string, string>;
+  const cacheControl = resp.headers.get('cache-control') || '';
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/);
+  const maxAgeSec = maxAgeMatch ? parseInt(maxAgeMatch[1], 10) : 3600;
+  cachedGoogleCerts = {
+    certs,
+    expiresAt: Date.now() + maxAgeSec * 1000,
+  };
+  return certs;
+}
+
+async function verifyFirebaseAdminIdToken(idToken: string): Promise<{ email: string; uid: string } | null> {
+  try {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) return null;
+    const [headerB64, payloadB64, sigB64] = parts;
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8'));
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+
+    const { firebaseConfig } = loadFirebaseConfigForServer();
+    const projectId = firebaseConfig.projectId;
+    if (!projectId || header.alg !== 'RS256' || !header.kid) return null;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (payload.aud !== projectId) return null;
+    if (payload.iss !== `https://securetoken.google.com/${projectId}`) return null;
+    if (typeof payload.exp !== 'number' || payload.exp <= nowSec) return null;
+    if (typeof payload.iat !== 'number' || payload.iat > nowSec + 300) return null;
+    if (!payload.sub || typeof payload.sub !== 'string') return null;
+
+    const certs = await getFirebasePublicCerts();
+    const cert = certs[header.kid];
+    if (!cert) return null;
+
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${headerB64}.${payloadB64}`);
+    verifier.end();
+    const sigBuffer = Buffer.from(sigB64, 'base64url');
+    const isValidSig = verifier.verify(cert, sigBuffer);
+    if (!isValidSig) return null;
+
+    if (payload.email_verified !== true || payload.email !== ADMIN_EMAIL) return null;
+    return { email: payload.email, uid: payload.sub };
+  } catch {
+    return null;
+  }
+}
 
 function getServerGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.VITE_GEMINI_API_KEY?.trim();
@@ -648,6 +830,7 @@ app.use((req, _res, next) => {
       !req.url.startsWith('/api/') &&
       (req.url.startsWith('/ai-assistant') ||
         req.url.startsWith('/ocr-document') ||
+        req.url.startsWith('/auth/') ||
         req.url.startsWith('/health'))
     ) {
       req.url = '/api' + req.url;
@@ -669,15 +852,27 @@ app.use((_req, res, next) => {
   next();
 });
 
-// Enable CORS for Vercel deployment
-app.use((_req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+// Strict origin-checked CORS (never wildcard '*' on authenticated endpoints)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (origin && host) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost === host || originHost.endsWith('.run.app') || originHost.endsWith('.vercel.app') || originHost.startsWith('localhost:')) {
+        res.header('Access-Control-Allow-Origin', origin);
+        res.header('Vary', 'Origin');
+      }
+    } catch {
+      // Ignore malformed origin
+    }
+  }
   res.header(
     'Access-Control-Allow-Headers',
     'Origin, X-Requested-With, Content-Type, Accept, Authorization'
   );
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  if (_req.method === 'OPTIONS') {
+  if (req.method === 'OPTIONS') {
     res.sendStatus(200);
     return;
   }
@@ -686,6 +881,278 @@ app.use((_req, res, next) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, status: 'AI Assistant Service Ready' });
+});
+
+// ============================================================================
+// SERVER-SIDE AUTHENTICATION ENDPOINTS
+// ============================================================================
+
+app.get('/api/auth/admin-status', (_req: Request, res: Response) => {
+  const envConfigured = Boolean(getConfiguredAdminPassword());
+  const claimed = Boolean(claimedAdminCred);
+  res.json({
+    envConfigured,
+    claimed,
+    requiresSetup: !envConfigured && !claimed,
+  });
+});
+
+app.post('/api/auth/claim-admin', (req: Request, res: Response) => {
+  try {
+    const envPass = getConfiguredAdminPassword();
+    if (envPass || claimedAdminCred) {
+      res.status(403).json({
+        success: false,
+        message: 'Tài khoản Admin đã được thiết lập mật khẩu. Không thể ghi đè qua bước khởi tạo.',
+      });
+      return;
+    }
+
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const password = typeof body.password === 'string' ? body.password.trim() : '';
+
+    if (password.length < 6 || password.length > 128) {
+      res.status(400).json({
+        success: false,
+        message: 'Mật khẩu Admin phải có độ dài từ 6 đến 128 ký tự.',
+      });
+      return;
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = hashScryptPassword(password, salt);
+    claimedAdminCred = { hash, salt };
+
+    const adminUser = {
+      username: 'admin',
+      displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+      role: 'admin',
+    };
+    const token = signServerToken(adminUser);
+
+    res.json({ success: true, token, user: adminUser });
+  } catch {
+    res.status(400).json({ success: false, message: 'Yêu cầu không hợp lệ.' });
+  }
+});
+
+app.post('/api/auth/google-admin-session', async (req: Request, res: Response) => {
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const idToken = typeof body.idToken === 'string' ? body.idToken.trim() : '';
+    if (!idToken) {
+      res.status(400).json({ success: false, message: 'Thiếu mã xác thực Google.' });
+      return;
+    }
+
+    const verified = await verifyFirebaseAdminIdToken(idToken);
+    if (!verified) {
+      res.status(403).json({
+        success: false,
+        message: 'Tài khoản Google này không có quyền Quản trị viên (Admin).',
+      });
+      return;
+    }
+
+    const adminUser = {
+      username: 'admin',
+      displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+      role: 'admin',
+      authMethod: 'google' as const,
+    };
+    const token = signServerToken(adminUser);
+    res.json({ success: true, token, user: adminUser });
+  } catch {
+    res.status(500).json({ success: false, message: 'Lỗi xác thực Google Admin.' });
+  }
+});
+
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const rawUsername = typeof body.username === 'string' ? body.username.trim() : '';
+    const rawPassword = typeof body.password === 'string' ? body.password.trim() : '';
+
+    if (!rawUsername || !rawPassword) {
+      res.status(400).json({ success: false, message: 'Vui lòng nhập tên đăng nhập và mật khẩu.' });
+      return;
+    }
+
+    // 1. Admin login is verified STRICTLY on server (never via client-writable Firestore doc)
+    if (rawUsername.toLowerCase() === 'admin') {
+      const envPass = getConfiguredAdminPassword();
+      if (envPass) {
+        if (!timingSafeStringEqual(rawPassword, envPass)) {
+          res.status(401).json({ success: false, message: 'Mật khẩu Admin không chính xác.' });
+          return;
+        }
+      } else if (claimedAdminCred) {
+        const computed = hashScryptPassword(rawPassword, claimedAdminCred.salt);
+        if (!timingSafeStringEqual(computed, claimedAdminCred.hash)) {
+          res.status(401).json({ success: false, message: 'Mật khẩu Admin không chính xác.' });
+          return;
+        }
+      } else {
+        res.status(403).json({
+          success: false,
+          requiresSetup: true,
+          message:
+            'Admin chưa thiết lập mật khẩu máy chủ. Vui lòng thiết lập mật khẩu Admin lần đầu hoặc đăng nhập bằng Google.',
+        });
+        return;
+      }
+
+      const adminUser = {
+        username: 'admin',
+        displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+        role: 'admin',
+        authMethod: 'password' as const,
+      };
+      const token = signServerToken(adminUser);
+      res.json({ success: true, token, user: adminUser });
+      return;
+    }
+
+    // 2. Non-admin login: verify PBKDF2 hash from Firestore on server (never trust client check)
+    const serverDb = getServerFirestoreDb();
+    let accSnap = await getDoc(doc(serverDb, 'accounts', rawUsername));
+    if (!accSnap.exists()) {
+      accSnap = await getDoc(doc(serverDb, 'accounts', rawUsername.toLowerCase()));
+    }
+
+    let resolvedUsername = rawUsername;
+    let resolvedAccountData: Record<string, any> | null = accSnap.exists() ? accSnap.data() : null;
+
+    if (!resolvedAccountData) {
+      const allAccsSnap = await getDocs(collection(serverDb, 'accounts'));
+      const matched = allAccsSnap.docs.find(
+        (d) =>
+          d.id.toLowerCase() === rawUsername.toLowerCase() ||
+          String(d.data()?.username || '').toLowerCase() === rawUsername.toLowerCase()
+      );
+      if (matched) {
+        resolvedUsername = matched.id;
+        resolvedAccountData = matched.data();
+      }
+    }
+
+    if (!resolvedAccountData) {
+      res.status(404).json({ success: false, message: 'Tài khoản không tồn tại trên hệ thống.' });
+      return;
+    }
+
+    if (resolvedAccountData.role === 'admin' || resolvedUsername.toLowerCase() === 'admin') {
+      res.status(403).json({ success: false, message: 'Tài khoản Admin phải đăng nhập qua xác thực Admin.' });
+      return;
+    }
+
+    let credSnap = await getDoc(doc(serverDb, 'account_credentials', resolvedUsername));
+    if (!credSnap.exists()) {
+      credSnap = await getDoc(doc(serverDb, 'account_credentials', resolvedUsername.toLowerCase()));
+    }
+
+    if (credSnap.exists()) {
+      const cred = credSnap.data();
+      const valid = verifyPbkdf2Sha256(
+        rawPassword,
+        String(cred.hash || ''),
+        String(cred.salt || ''),
+        typeof cred.iterations === 'number' ? cred.iterations : 100000
+      );
+      if (!valid) {
+        res.status(401).json({ success: false, message: 'Mật khẩu không chính xác.' });
+        return;
+      }
+    } else {
+      const legacyPass = typeof resolvedAccountData.password === 'string' ? resolvedAccountData.password : '';
+      const validLegacy = legacyPass ? timingSafeStringEqual(rawPassword, legacyPass) : rawPassword === '12345678';
+      if (!validLegacy) {
+        res.status(401).json({ success: false, message: 'Mật khẩu không chính xác.' });
+        return;
+      }
+    }
+
+    const userPayload = {
+      username: String(resolvedAccountData.username || resolvedUsername),
+      displayName: String(resolvedAccountData.displayName || resolvedUsername),
+      role: String(resolvedAccountData.role || 'phhs'),
+      classId: resolvedAccountData.classId ? String(resolvedAccountData.classId) : undefined,
+      assignedGroup: typeof resolvedAccountData.assignedGroup === 'number' ? resolvedAccountData.assignedGroup : undefined,
+      studentId: resolvedAccountData.studentId ? String(resolvedAccountData.studentId) : undefined,
+      studentName: resolvedAccountData.studentName ? String(resolvedAccountData.studentName) : undefined,
+    };
+    const token = signServerToken(userPayload);
+    res.json({ success: true, token, user: userPayload });
+  } catch (err) {
+    console.error('Server login error:', err);
+    res.status(500).json({ success: false, message: 'Lỗi xác thực máy chủ. Vui lòng thử lại.' });
+  }
+});
+
+app.post('/api/auth/verify-session', (req: Request, res: Response) => {
+  const token = extractBearerToken(req);
+  const payload = verifyServerToken(token);
+  if (!payload) {
+    res.status(401).json({ valid: false });
+    return;
+  }
+  res.json({ valid: true, user: payload });
+});
+
+app.post('/api/auth/change-admin-password', (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req);
+    const session = verifyServerToken(token);
+    if (!session || session.role !== 'admin') {
+      res.status(401).json({ success: false, message: 'Phiên đăng nhập Admin không hợp lệ hoặc đã hết hạn.' });
+      return;
+    }
+
+    const envPass = getConfiguredAdminPassword();
+    if (envPass) {
+      res.status(400).json({
+        success: false,
+        message: 'Mật khẩu Admin đang được cấu hình cố định qua biến môi trường ADMIN_PASSWORD trên máy chủ.',
+      });
+      return;
+    }
+
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword.trim() : '';
+    const newPassword = typeof body.newPassword === 'string' ? body.newPassword.trim() : '';
+
+    if (newPassword.length < 6 || newPassword.length > 128) {
+      res.status(400).json({ success: false, message: 'Mật khẩu mới phải từ 6 đến 128 ký tự.' });
+      return;
+    }
+
+    if (claimedAdminCred && session.authMethod !== 'google') {
+      const computed = hashScryptPassword(oldPassword, claimedAdminCred.salt);
+      if (!timingSafeStringEqual(computed, claimedAdminCred.hash)) {
+        res.status(401).json({ success: false, message: 'Mật khẩu hiện tại không đúng.' });
+        return;
+      }
+    }
+
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    const newHash = hashScryptPassword(newPassword, newSalt);
+    claimedAdminCred = { hash: newHash, salt: newSalt };
+
+    const newToken = signServerToken({
+      username: 'admin',
+      displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+      role: 'admin',
+      authMethod: session.authMethod || 'password',
+    });
+
+    res.json({
+      success: true,
+      token: newToken,
+      message: 'Đổi mật khẩu Admin thành công trên máy chủ!',
+    });
+  } catch {
+    res.status(400).json({ success: false, message: 'Lỗi khi cập nhật mật khẩu Admin.' });
+  }
 });
 
 // AI Document & Handwriting OCR endpoint using Gemma 4
@@ -867,7 +1334,19 @@ app.post('/api/ai-assistant', async (req: Request, res: Response) => {
       return;
     }
 
-    const scope: UserScopePayload = userScope || { role: 'guest' };
+    const bearerToken = extractBearerToken(req);
+    const verifiedSession = verifyServerToken(bearerToken);
+    const scope: UserScopePayload = verifiedSession
+      ? {
+          username: verifiedSession.username,
+          displayName: verifiedSession.displayName,
+          role: verifiedSession.role,
+          classId: verifiedSession.classId,
+          assignedGroup: verifiedSession.assignedGroup,
+          studentId: verifiedSession.studentId,
+          studentName: verifiedSession.studentName,
+        }
+      : { role: 'guest' };
     const safeData = enforceDataIsolation(scope, authorizedData);
     const prunedData = pruneContextForQuery(message, scope, safeData);
 
