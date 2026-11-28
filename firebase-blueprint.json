@@ -281,6 +281,32 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["classId", "week", "group", "requesterUsername", "requesterName", "reason", "requestedDurationHours", "status", "createdAt", "updatedAt"]
+    },
+    "GoogleAccountLink": {
+      "title": "GoogleAccountLink",
+      "description": "Liên kết 1-1 giữa tài khoản Google (Gmail đã xác thực) và một tài khoản hệ thống",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 200 },
+        "linkedUsername": { "type": "string", "maxLength": 128 },
+        "linkedRole": { "type": "string", "enum": ["gvcn", "loptruong", "loppho", "to1", "to2", "to3", "to4", "phhs"] },
+        "linkProof": { "type": "string", "maxLength": 256 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "email", "linkedUsername", "linkedRole", "linkProof", "createdAt", "updatedAt"]
+    },
+    "UsernameGoogleLink": {
+      "title": "UsernameGoogleLink",
+      "description": "Khóa duy nhất đảm bảo mỗi tài khoản hệ thống chỉ liên kết tối đa một tài khoản Google",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "linkedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["username", "uid", "linkedAt"]
     }
   },
   "firestore": {
@@ -339,6 +365,14 @@
     "/supplemental_score_requests/{requestId}": {
       "schema": "SupplementalScoreRequest",
       "description": "Đơn xin phép nhập điểm bổ sung của các tổ trưởng chờ Admin/GVCN/Lớp trưởng duyệt"
+    },
+    "/google_account_links/{uid}": {
+      "schema": "GoogleAccountLink",
+      "description": "Ánh xạ từ Google UID sang tài khoản hệ thống đã liên kết"
+    },
+    "/username_google_links/{username}": {
+      "schema": "UsernameGoogleLink",
+      "description": "Ánh xạ ngược từ username sang Google UID để chống trùng lặp liên kết"
     }
   }
 }

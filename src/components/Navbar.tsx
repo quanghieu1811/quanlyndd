@@ -40,6 +40,7 @@ import {
   FolderCheck,
   MessageSquareHeart,
   Terminal,
+  Unlink,
 } from 'lucide-react';
 
 import { Student, SchoolClass, SchoolSystemConfig } from '../types.ts';
@@ -97,7 +98,14 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenPromptLog,
   pendingSupplementalCount = 0,
 }) => {
-  const { currentUser, logout, isAllPermitted, isTeacherOrAdmin } = useAuth();
+  const {
+    currentUser,
+    linkedGoogleEmail,
+    unlinkGoogleAccount,
+    logout,
+    isAllPermitted,
+    isTeacherOrAdmin,
+  } = useAuth();
   const { mode, isDark, setMode, toggleTheme } = useTheme();
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
@@ -548,9 +556,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <div className="px-3 py-2 border-b border-slate-100 mb-1">
                     <span className="text-[10px] text-slate-400 block">Đang đăng nhập:</span>
                     <span className="font-bold text-slate-800 block">{currentUser.displayName}</span>
-                    <span className="text-[11px] text-blue-600 font-semibold">
+                    <span className="text-[11px] text-blue-600 font-semibold block">
                       Tài khoản: {currentUser.username}
                     </span>
+                    {linkedGoogleEmail && (
+                      <span className="text-[10px] text-emerald-700 font-semibold inline-flex items-center gap-1 mt-1 truncate max-w-full">
+                        <Mail className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{linkedGoogleEmail}</span>
+                      </span>
+                    )}
                   </div>
 
                   <button
@@ -563,6 +577,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                     <KeyRound className="w-4 h-4 text-amber-500" />
                     Đổi mật khẩu
                   </button>
+
+                  {linkedGoogleEmail && currentUser.role !== 'admin' && (
+                    <button
+                      onClick={async () => {
+                        await unlinkGoogleAccount();
+                        setUserDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-rose-700 hover:bg-rose-50 transition text-left cursor-pointer font-medium"
+                    >
+                      <Unlink className="w-4 h-4 text-rose-500" />
+                      Gỡ liên kết Gmail
+                    </button>
+                  )}
 
                   <button
                     onClick={() => {

@@ -72,7 +72,7 @@ import {
 import { Loader2, Bell, AlertTriangle, Clock, X, ArrowRight, Lock } from 'lucide-react';
 
 function MainContent() {
-  const { currentUser, isTeacherOrAdmin, loading: authLoading } = useAuth();
+  const { currentUser, pendingGoogleUser, isTeacherOrAdmin, loading: authLoading } = useAuth();
   const initialRoute = useMemo(() => parseRoute(), []);
 
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
@@ -399,13 +399,15 @@ function MainContent() {
     replaceRoute(activeTab, null);
   };
 
-  // Close login modal if user logs in
+  // Close login modal if user logs in, or open linking modal if first-time Gmail needs linking
   useEffect(() => {
     if (currentUser && isLoginOpen) {
       handleCloseLogin();
       handleNavigateTab('welcome');
+    } else if (pendingGoogleUser && !currentUser && !isLoginOpen) {
+      setIsLoginOpen(true);
     }
-  }, [currentUser]);
+  }, [currentUser, pendingGoogleUser]);
 
   // 1. Eagerly load ALL global datasets once when website opens (no lazy-loading on tab/modal click)
   useEffect(() => {

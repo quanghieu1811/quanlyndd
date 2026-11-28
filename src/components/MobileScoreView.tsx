@@ -110,6 +110,7 @@ import {
   Clock,
   Layers,
   Award,
+  Unlink,
 } from 'lucide-react';
 
 type MobileTab = 'overview' | 'groups' | 'ranking' | 'student';
@@ -211,7 +212,15 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
   onOpenSystemSettings,
   onOpenAiAssistant,
 }) => {
-  const { currentUser, logout, isAllPermitted, isTeacherOrAdmin, canManageGroup } = useAuth();
+  const {
+    currentUser,
+    linkedGoogleEmail,
+    unlinkGoogleAccount,
+    logout,
+    isAllPermitted,
+    isTeacherOrAdmin,
+    canManageGroup,
+  } = useAuth();
   const { mode, isDark, setMode } = useTheme();
 
   const isPhhs = currentUser?.role === 'phhs';
@@ -3365,6 +3374,12 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                     ? `Tài khoản: ${currentUser.username}`
                     : 'Đăng nhập để nhập hoặc duyệt điểm'}
                 </div>
+                {currentUser && linkedGoogleEmail && (
+                  <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold flex items-center gap-1 mt-0.5">
+                    <Mail className="w-3 h-3 shrink-0" />
+                    <span className="truncate">{linkedGoogleEmail}</span>
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -3633,6 +3648,19 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       <KeyRound className="w-4 h-4 text-amber-600" />
                       <span>Đổi mật khẩu</span>
                     </button>
+                    {linkedGoogleEmail && currentUser.role !== 'admin' && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await unlinkGoogleAccount();
+                          setIsAccountSheetOpen(false);
+                        }}
+                        className="w-full min-h-[48px] px-4 flex items-center gap-2.5 text-sm font-semibold text-rose-700 dark:text-rose-400 cursor-pointer"
+                      >
+                        <Unlink className="w-4 h-4" />
+                        <span>Gỡ liên kết Gmail</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {

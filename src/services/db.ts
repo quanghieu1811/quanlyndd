@@ -617,6 +617,75 @@ export async function updateAccountPassword(username: string, newPassword: strin
   }
 }
 
+export const GOOGLE_ACCOUNT_LINKS_COLL = 'google_account_links';
+export const USERNAME_GOOGLE_LINKS_COLL = 'username_google_links';
+
+export interface GoogleAccountLinkDoc {
+  uid: string;
+  email: string;
+  linkedUsername: string;
+  linkedRole: string;
+  linkProof: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UsernameGoogleLinkDoc {
+  username: string;
+  uid: string;
+  linkedAt: string;
+}
+
+export async function saveGoogleAccountLinks(
+  uid: string,
+  linkDoc: GoogleAccountLinkDoc,
+  usernameLinkDoc: UsernameGoogleLinkDoc,
+  previousLinkedUsername?: string | null
+): Promise<boolean> {
+  if (!uid || !linkDoc?.linkedUsername || !usernameLinkDoc?.username) return false;
+  try {
+    if (previousLinkedUsername && previousLinkedUsername !== usernameLinkDoc.username) {
+      try {
+        await deleteDoc(doc(db, USERNAME_GOOGLE_LINKS_COLL, previousLinkedUsername));
+      } catch (cleanupErr) {
+        handleFirestoreError(
+          cleanupErr,
+          OperationType.DELETE,
+          `${USERNAME_GOOGLE_LINKS_COLL}/${previousLinkedUsername}`
+        );
+      }
+    }
+
+    await setDoc(doc(db, USERNAME_GOOGLE_LINKS_COLL, usernameLinkDoc.username), usernameLinkDoc);
+    await setDoc(doc(db, GOOGLE_ACCOUNT_LINKS_COLL, uid), linkDoc);
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `${GOOGLE_ACCOUNT_LINKS_COLL}/${uid}`);
+    console.error('Error saving Google account links:', error);
+    return false;
+  }
+}
+
+export async function deleteGoogleAccountLinks(uid: string, linkedUsername?: string | null): Promise<boolean> {
+  if (!uid) return false;
+  let allOk = true;
+  try {
+    await deleteDoc(doc(db, GOOGLE_ACCOUNT_LINKS_COLL, uid));
+  } catch (error) {
+    allOk = false;
+    handleFirestoreError(error, OperationType.DELETE, `${GOOGLE_ACCOUNT_LINKS_COLL}/${uid}`);
+  }
+  if (linkedUsername) {
+    try {
+      await deleteDoc(doc(db, USERNAME_GOOGLE_LINKS_COLL, linkedUsername));
+    } catch (error) {
+      allOk = false;
+      handleFirestoreError(error, OperationType.DELETE, `${USERNAME_GOOGLE_LINKS_COLL}/${linkedUsername}`);
+    }
+  }
+  return allOk;
+}
+
 function getOtherClassNamesFor8A1(): Set<string> {
   const set = new Set<string>();
   [RAW_STUDENTS_6A1, RAW_STUDENTS_6A4, RAW_STUDENTS_7A5, RAW_STUDENTS_8A3, RAW_STUDENTS_9A3].forEach((list) => {

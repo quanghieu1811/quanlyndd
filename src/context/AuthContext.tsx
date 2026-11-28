@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { auth, googleProvider, ADMIN_EMAIL } from '../firebase/config.ts';
 import { UserAccount, Role } from '../types.ts';
 import {
@@ -8,8 +8,17 @@ import {
   DEFAULT_ACCOUNTS,
   updateAccountPassword,
   isFirebaseAdminSignedIn,
+  saveGoogleAccountLinks,
+  deleteGoogleAccountLinks,
 } from '../services/db.ts';
 import { setInMemoryBearerToken, getInMemoryBearerToken } from '../utils/sessionTokenStore.ts';
+
+export interface PendingGoogleUser {
+  uid: string;
+  email: string;
+  displayName?: string;
+  staleMessage?: string;
+}
 
 interface AuthContextType {
   currentUser: UserAccount | null;
@@ -17,11 +26,20 @@ interface AuthContextType {
   loading: boolean;
   isFirebaseAdmin: boolean;
   adminRequiresSetup: boolean;
+  pendingGoogleUser: PendingGoogleUser | null;
+  linkedGoogleEmail: string | null;
   login: (
     username: string,
     password: string
   ) => Promise<{ success: boolean; message?: string; requiresSetup?: boolean }>;
-  loginWithGoogleAdmin: () => Promise<{ success: boolean; message?: string }>;
+  loginWithGoogle: () => Promise<{ success: boolean; needsLinking?: boolean; message?: string }>;
+  loginWithGoogleAdmin: () => Promise<{ success: boolean; needsLinking?: boolean; message?: string }>;
+  linkGoogleToAccount: (
+    username: string,
+    password: string
+  ) => Promise<{ success: boolean; message?: string }>;
+  cancelGoogleLinking: () => Promise<void>;
+  unlinkGoogleAccount: () => Promise<{ success: boolean; message?: string }>;
   claimAdminPassword: (password: string) => Promise<{ success: boolean; message?: string }>;
   logout: () => Promise<void>;
   changePassword: (oldPass: string, newPass: string) => Promise<{ success: boolean; message?: string }>;
@@ -47,12 +65,27 @@ const ADMIN_USER_PROFILE: UserAccount = {
   role: 'admin',
 };
 
+function mapServerUser(rawUser: any): UserAccount {
+  return {
+    username: rawUser.username,
+    displayName: rawUser.displayName || rawUser.username,
+    role: rawUser.role as Role,
+    classId: rawUser.classId,
+    assignedGroup: rawUser.assignedGroup,
+    studentId: rawUser.studentId,
+    studentName: rawUser.studentName,
+  };
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [accounts, setAccounts] = useState<UserAccount[]>(DEFAULT_ACCOUNTS);
   const [loading, setLoading] = useState(true);
   const [isFirebaseAdmin, setIsFirebaseAdmin] = useState(false);
   const [adminRequiresSetup, setAdminRequiresSetup] = useState(false);
+  const [pendingGoogleUser, setPendingGoogleUser] = useState<PendingGoogleUser | null>(null);
+  const [linkedGoogleEmail, setLinkedGoogleEmail] = useState<string | null>(null);
+  const googlePopupInFlightRef = useRef(false);
 
   const refreshAdminStatus = async (): Promise<boolean> => {
     try {
@@ -88,36 +121,86 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const authenticateFirebaseGoogleUser = async (
+    firebaseUser: User
+  ): Promise<{ success: boolean; needsLinking?: boolean; message?: string }> => {
+    if (!firebaseUser.emailVerified || !firebaseUser.email) {
+      await signOut(auth).catch(() => {});
+      setIsFirebaseAdmin(false);
+      setLinkedGoogleEmail(null);
+      setPendingGoogleUser(null);
+      return {
+        success: false,
+        message: 'Tài khoản Google chưa được xác minh địa chỉ email.',
+      };
+    }
+
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      const resp = await fetch('/api/auth/google-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      const data = await resp.json().catch(() => ({}));
+
+      if (resp.ok && data?.success && data?.token && data?.user) {
+        setInMemoryBearerToken(data.token);
+        const mappedUser = mapServerUser(data.user);
+        const isAdmin = mappedUser.role === 'admin' && firebaseUser.email === ADMIN_EMAIL;
+        setIsFirebaseAdmin(isAdmin);
+        setPendingGoogleUser(null);
+        setLinkedGoogleEmail(data.linkedGoogleEmail || firebaseUser.email);
+        setCurrentUser(mappedUser);
+        if (isAdmin) {
+          initializeDatabase().catch(() => {});
+        }
+        return { success: true };
+      }
+
+      if (data?.needsLinking) {
+        setIsFirebaseAdmin(false);
+        setLinkedGoogleEmail(null);
+        setPendingGoogleUser({
+          uid: data.uid || firebaseUser.uid,
+          email: data.email || firebaseUser.email,
+          displayName: data.displayName || firebaseUser.displayName || firebaseUser.email,
+          staleMessage: data.staleLink ? data.message : undefined,
+        });
+        return {
+          success: false,
+          needsLinking: true,
+          message: data.message,
+        };
+      }
+
+      return {
+        success: false,
+        message: data?.message || 'Không thể xác thực tài khoản Google trên máy chủ.',
+      };
+    } catch (err) {
+      console.warn('Could not exchange Google ID token for server session:', err);
+      return {
+        success: false,
+        message: 'Lỗi kết nối máy chủ khi xác thực Google.',
+      };
+    }
+  };
+
   useEffect(() => {
     loadData();
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser && firebaseUser.emailVerified && firebaseUser.email === ADMIN_EMAIL) {
-        setIsFirebaseAdmin(true);
-        try {
-          const idToken = await firebaseUser.getIdToken();
-          const resp = await fetch('/api/auth/google-admin-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ idToken }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data?.token) {
-              setInMemoryBearerToken(data.token);
-            }
-          }
-        } catch (err) {
-          console.warn('Could not exchange Google ID token for server session:', err);
-        }
-        setCurrentUser(ADMIN_USER_PROFILE);
-        initializeDatabase().catch(() => {});
+      if (googlePopupInFlightRef.current) {
+        return;
+      }
+
+      if (firebaseUser) {
+        await authenticateFirebaseGoogleUser(firebaseUser);
       } else {
         setIsFirebaseAdmin(false);
-        if (firebaseUser) {
-          // Only ADMIN_EMAIL is permitted for Firebase Admin sign-in
-          await signOut(auth).catch(() => {});
-        }
+        setLinkedGoogleEmail(null);
+        setPendingGoogleUser(null);
       }
     });
 
@@ -155,17 +238,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       setInMemoryBearerToken(data.token);
-
-      const serverUser: UserAccount = {
-        username: data.user.username,
-        displayName: data.user.displayName || data.user.username,
-        role: data.user.role as Role,
-        classId: data.user.classId,
-        assignedGroup: data.user.assignedGroup,
-        studentId: data.user.studentId,
-        studentName: data.user.studentName,
-      };
-      setCurrentUser(serverUser);
+      setPendingGoogleUser(null);
+      setLinkedGoogleEmail(null);
+      setCurrentUser(mapServerUser(data.user));
       return { success: true };
     } catch (err) {
       console.error('Login request failed:', err);
@@ -173,41 +248,119 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const loginWithGoogleAdmin = async (): Promise<{ success: boolean; message?: string }> => {
+  const loginWithGoogle = async (): Promise<{
+    success: boolean;
+    needsLinking?: boolean;
+    message?: string;
+  }> => {
+    googlePopupInFlightRef.current = true;
     try {
       const result = await signInWithPopup(auth, googleProvider);
-      const fbUser = result.user;
-
-      if (!fbUser.emailVerified || fbUser.email !== ADMIN_EMAIL) {
-        await signOut(auth).catch(() => {});
-        setIsFirebaseAdmin(false);
-        return {
-          success: false,
-          message: `Tài khoản Google (${fbUser.email || 'không rõ'}) không có quyền Quản trị viên (Admin).`,
-        };
-      }
-
-      const idToken = await fbUser.getIdToken();
-      const resp = await fetch('/api/auth/google-admin-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (resp.ok && data?.token) {
-        setInMemoryBearerToken(data.token);
-      }
-
-      setIsFirebaseAdmin(true);
-      setCurrentUser(ADMIN_USER_PROFILE);
-      initializeDatabase().catch(() => {});
-      return { success: true };
+      return await authenticateFirebaseGoogleUser(result.user);
     } catch (err: any) {
       if (err?.code === 'auth/popup-closed-by-user') {
         return { success: false, message: 'Bạn đã đóng cửa sổ đăng nhập Google.' };
       }
       return { success: false, message: err?.message || 'Đăng nhập Google thất bại.' };
+    } finally {
+      googlePopupInFlightRef.current = false;
     }
+  };
+
+  const linkGoogleToAccount = async (
+    username: string,
+    password: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    const fbUser = auth.currentUser;
+    if (!fbUser || !fbUser.emailVerified) {
+      return {
+        success: false,
+        message: 'Phiên Google đã hết hạn. Vui lòng bấm đăng nhập bằng Google lại.',
+      };
+    }
+
+    const cleanUser = username.trim();
+    const cleanPass = password.trim();
+    if (!cleanUser || !cleanPass) {
+      return {
+        success: false,
+        message: 'Vui lòng chọn tài khoản hệ thống và nhập mật khẩu xác nhận.',
+      };
+    }
+
+    try {
+      const idToken = await fbUser.getIdToken(true);
+      const resp = await fetch('/api/auth/link-google-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken, username: cleanUser, password: cleanPass }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success || !data?.token || !data?.linkDoc || !data?.usernameLinkDoc) {
+        return {
+          success: false,
+          message: data?.message || 'Không thể liên kết tài khoản Google. Vui lòng kiểm tra lại.',
+        };
+      }
+
+      const saved = await saveGoogleAccountLinks(
+        fbUser.uid,
+        data.linkDoc,
+        data.usernameLinkDoc,
+        data.previousLinkedUsername
+      );
+      if (!saved) {
+        return {
+          success: false,
+          message: 'Không thể lưu liên kết Gmail lên hệ thống Firestore. Vui lòng thử lại.',
+        };
+      }
+
+      setInMemoryBearerToken(data.token);
+      setIsFirebaseAdmin(false);
+      setPendingGoogleUser(null);
+      setLinkedGoogleEmail(data.linkedGoogleEmail || fbUser.email || null);
+      setCurrentUser(mapServerUser(data.user));
+      return { success: true };
+    } catch (err) {
+      console.error('Failed to link Google account:', err);
+      return {
+        success: false,
+        message: 'Lỗi kết nối máy chủ khi liên kết tài khoản Google.',
+      };
+    }
+  };
+
+  const cancelGoogleLinking = async (): Promise<void> => {
+    setPendingGoogleUser(null);
+    if (auth.currentUser) {
+      await signOut(auth).catch(() => {});
+    }
+  };
+
+  const unlinkGoogleAccount = async (): Promise<{ success: boolean; message?: string }> => {
+    if (!currentUser || currentUser.role === 'admin') {
+      return { success: false, message: 'Không thể gỡ liên kết cho tài khoản này.' };
+    }
+    const fbUser = auth.currentUser;
+    if (!fbUser) {
+      setLinkedGoogleEmail(null);
+      return { success: false, message: 'Không tìm thấy phiên Google đang liên kết.' };
+    }
+
+    const ok = await deleteGoogleAccountLinks(fbUser.uid, currentUser.username);
+    if (!ok) {
+      return { success: false, message: 'Không thể gỡ liên kết Gmail. Vui lòng thử lại.' };
+    }
+
+    setLinkedGoogleEmail(null);
+    setPendingGoogleUser(null);
+    await signOut(auth).catch(() => {});
+    return {
+      success: true,
+      message: 'Đã gỡ liên kết Gmail khỏi tài khoản này. Lần đăng nhập Google tiếp theo sẽ yêu cầu liên kết lại.',
+    };
   };
 
   const claimAdminPassword = async (password: string): Promise<{ success: boolean; message?: string }> => {
@@ -227,6 +380,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setInMemoryBearerToken(data.token);
       setAdminRequiresSetup(false);
+      setPendingGoogleUser(null);
       setCurrentUser(ADMIN_USER_PROFILE);
       return { success: true };
     } catch {
@@ -238,6 +392,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setInMemoryBearerToken(null);
     setCurrentUser(null);
     setIsFirebaseAdmin(false);
+    setPendingGoogleUser(null);
+    setLinkedGoogleEmail(null);
     try {
       localStorage.removeItem('auth_session_token');
       localStorage.removeItem('auth_username');
@@ -378,8 +534,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loading,
         isFirebaseAdmin,
         adminRequiresSetup,
+        pendingGoogleUser,
+        linkedGoogleEmail,
         login,
-        loginWithGoogleAdmin,
+        loginWithGoogle,
+        loginWithGoogleAdmin: loginWithGoogle,
+        linkGoogleToAccount,
+        cancelGoogleLinking,
+        unlinkGoogleAccount,
         claimAdminPassword,
         logout,
         changePassword,

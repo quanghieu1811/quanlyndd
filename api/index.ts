@@ -11,6 +11,7 @@ dotenv.config();
 
 const ADMIN_EMAIL = 'quanghieun370@gmail.com';
 const SESSION_SECRET = process.env.SESSION_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
+const GOOGLE_LINK_SECRET = process.env.GOOGLE_LINK_SECRET?.trim() || SESSION_SECRET;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface ServerAdminCred {
@@ -149,7 +150,9 @@ async function getFirebasePublicCerts(): Promise<Record<string, string>> {
   return certs;
 }
 
-async function verifyFirebaseAdminIdToken(idToken: string): Promise<{ email: string; uid: string } | null> {
+async function verifyFirebaseIdToken(
+  idToken: string
+): Promise<{ email: string; uid: string; emailVerified: boolean; name?: string } | null> {
   try {
     const parts = idToken.split('.');
     if (parts.length !== 3) return null;
@@ -179,11 +182,201 @@ async function verifyFirebaseAdminIdToken(idToken: string): Promise<{ email: str
     const isValidSig = verifier.verify(cert, sigBuffer);
     if (!isValidSig) return null;
 
-    if (payload.email_verified !== true || payload.email !== ADMIN_EMAIL) return null;
-    return { email: payload.email, uid: payload.sub };
+    if (payload.email_verified !== true || typeof payload.email !== 'string' || !payload.email) {
+      return null;
+    }
+
+    return {
+      email: payload.email,
+      uid: payload.sub,
+      emailVerified: true,
+      name: typeof payload.name === 'string' ? payload.name : undefined,
+    };
   } catch {
     return null;
   }
+}
+
+async function verifyFirebaseAdminIdToken(idToken: string): Promise<{ email: string; uid: string } | null> {
+  const verified = await verifyFirebaseIdToken(idToken);
+  if (!verified || verified.email !== ADMIN_EMAIL) return null;
+  return { email: verified.email, uid: verified.uid };
+}
+
+function signGoogleLinkProof(uid: string, email: string, linkedUsername: string, linkedRole: string): string {
+  const payload = `${uid}:${email.toLowerCase()}:${linkedUsername}:${linkedRole}`;
+  return crypto.createHmac('sha256', GOOGLE_LINK_SECRET).update(payload).digest('base64url');
+}
+
+function verifyGoogleLinkProof(
+  uid: string,
+  email: string,
+  linkedUsername: string,
+  linkedRole: string,
+  linkProof: string
+): boolean {
+  if (!uid || !email || !linkedUsername || !linkedRole || !linkProof) return false;
+  const expected = signGoogleLinkProof(uid, email, linkedUsername, linkedRole);
+  return timingSafeStringEqual(linkProof, expected);
+}
+
+function parseFirestoreRestValue(val: any): any {
+  if (!val || typeof val !== 'object') return undefined;
+  if ('stringValue' in val) return val.stringValue;
+  if ('booleanValue' in val) return val.booleanValue;
+  if ('integerValue' in val) return Number(val.integerValue);
+  if ('doubleValue' in val) return Number(val.doubleValue);
+  if ('nullValue' in val) return null;
+  if ('timestampValue' in val) return val.timestampValue;
+  if ('arrayValue' in val) {
+    return Array.isArray(val.arrayValue?.values)
+      ? val.arrayValue.values.map(parseFirestoreRestValue)
+      : [];
+  }
+  if ('mapValue' in val) {
+    const out: Record<string, any> = {};
+    const fields = val.mapValue?.fields || {};
+    for (const [k, v] of Object.entries(fields)) {
+      out[k] = parseFirestoreRestValue(v);
+    }
+    return out;
+  }
+  return undefined;
+}
+
+async function firestoreRestGet(
+  collectionName: string,
+  docId: string,
+  idToken: string
+): Promise<{ exists: boolean; data: Record<string, any> | null; status: number }> {
+  const { firebaseConfig, databaseId } = loadFirebaseConfigForServer();
+  const projectId = firebaseConfig.projectId;
+  if (!projectId) {
+    return { exists: false, data: null, status: 500 };
+  }
+  const dbSegment = databaseId ? encodeURIComponent(databaseId) : '(default)';
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${dbSegment}/documents/${collectionName}/${encodeURIComponent(docId)}`;
+
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  });
+
+  if (resp.status === 404) {
+    return { exists: false, data: null, status: 404 };
+  }
+
+  if (!resp.ok) {
+    return { exists: false, data: null, status: resp.status };
+  }
+
+  const json = (await resp.json()) as { fields?: Record<string, any> };
+  const parsed: Record<string, any> = {};
+  if (json.fields && typeof json.fields === 'object') {
+    for (const [key, value] of Object.entries(json.fields)) {
+      parsed[key] = parseFirestoreRestValue(value);
+    }
+  }
+  return { exists: true, data: parsed, status: 200 };
+}
+
+function serverStudentNameToUsername(name: string, classId?: string): string {
+  if (!name) return '';
+  const noAccents = name
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+  const words = noAccents.split(/\s+/).filter(Boolean);
+  const base = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
+  return classId ? `${base}${classId}` : base;
+}
+
+async function resolveNonAdminSystemAccount(
+  rawUsername: string
+): Promise<{ username: string; accountData: Record<string, any> } | null> {
+  const clean = rawUsername.trim();
+  if (!clean) return null;
+  const serverDb = getServerFirestoreDb();
+
+  let accSnap = await getDoc(doc(serverDb, 'accounts', clean));
+  if (!accSnap.exists()) {
+    accSnap = await getDoc(doc(serverDb, 'accounts', clean.toLowerCase()));
+  }
+
+  if (accSnap.exists()) {
+    return { username: accSnap.id, accountData: accSnap.data() };
+  }
+
+  const allAccsSnap = await getDocs(collection(serverDb, 'accounts'));
+  const matched = allAccsSnap.docs.find(
+    (d) =>
+      d.id.toLowerCase() === clean.toLowerCase() ||
+      String(d.data()?.username || '').toLowerCase() === clean.toLowerCase()
+  );
+  if (matched) {
+    return { username: matched.id, accountData: matched.data() };
+  }
+
+  // Fallback: check dynamically generated PHHS accounts from students collection
+  const stuSnap = await getDocs(collection(serverDb, 'students'));
+  const targetLower = clean.toLowerCase();
+  for (const stuDoc of stuSnap.docs) {
+    const stu = stuDoc.data();
+    const stuName = typeof stu?.name === 'string' ? stu.name.trim() : '';
+    if (!stuName) continue;
+    const classId = typeof stu?.classId === 'string' && stu.classId ? stu.classId : '8A1';
+    const phhsUsername = serverStudentNameToUsername(stuName, classId);
+    const legacyUsername = serverStudentNameToUsername(stuName);
+    if (
+      phhsUsername.toLowerCase() === targetLower ||
+      legacyUsername.toLowerCase() === targetLower
+    ) {
+      return {
+        username: phhsUsername,
+        accountData: {
+          username: phhsUsername,
+          displayName: `PHHS em ${stuName} (${classId})`,
+          role: 'phhs',
+          assignedGroup: typeof stu.group === 'number' ? stu.group : undefined,
+          classId,
+          studentId: stuDoc.id,
+          studentName: stuName,
+          studentSTT: typeof stu.stt === 'number' ? stu.stt : undefined,
+        },
+      };
+    }
+  }
+
+  return null;
+}
+
+async function verifyNonAdminSystemPassword(
+  resolvedUsername: string,
+  accountData: Record<string, any>,
+  rawPassword: string
+): Promise<boolean> {
+  const serverDb = getServerFirestoreDb();
+  let credSnap = await getDoc(doc(serverDb, 'account_credentials', resolvedUsername));
+  if (!credSnap.exists()) {
+    credSnap = await getDoc(doc(serverDb, 'account_credentials', resolvedUsername.toLowerCase()));
+  }
+
+  if (credSnap.exists()) {
+    const cred = credSnap.data();
+    return verifyPbkdf2Sha256(
+      rawPassword,
+      String(cred.hash || ''),
+      String(cred.salt || ''),
+      typeof cred.iterations === 'number' ? cred.iterations : 100000
+    );
+  }
+
+  const legacyPass = typeof accountData.password === 'string' ? accountData.password : '';
+  return legacyPass ? timingSafeStringEqual(rawPassword, legacyPass) : rawPassword === '12345678';
 }
 
 function getServerGeminiClient(): GoogleGenAI | null {
@@ -967,6 +1160,259 @@ app.post('/api/auth/google-admin-session', async (req: Request, res: Response) =
   }
 });
 
+// Unified Google (Gmail) Login:
+// - ADMIN_EMAIL logs directly into 'admin'.
+// - Any verified Gmail checks /google_account_links/{uid}:
+//   - If linked and linkProof matches, logs directly into the linked system account.
+//   - If not yet linked (or stale proof), returns { needsLinking: true } so UI lets them pick & confirm 1 system account.
+app.post('/api/auth/google-login', async (req: Request, res: Response) => {
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const idToken = typeof body.idToken === 'string' ? body.idToken.trim() : '';
+    if (!idToken) {
+      res.status(400).json({ success: false, message: 'Thiếu mã xác thực Google.' });
+      return;
+    }
+
+    const verified = await verifyFirebaseIdToken(idToken);
+    if (!verified) {
+      res.status(401).json({
+        success: false,
+        message: 'Phiên Google không hợp lệ hoặc email chưa được xác minh.',
+      });
+      return;
+    }
+
+    if (verified.email === ADMIN_EMAIL) {
+      const adminUser = {
+        username: 'admin',
+        displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+        role: 'admin',
+        authMethod: 'google' as const,
+      };
+      const token = signServerToken(adminUser);
+      res.json({
+        success: true,
+        isAdmin: true,
+        linkedGoogleEmail: verified.email,
+        token,
+        user: adminUser,
+      });
+      return;
+    }
+
+    const linkRes = await firestoreRestGet('google_account_links', verified.uid, idToken);
+    if (!linkRes.exists || !linkRes.data) {
+      res.json({
+        success: false,
+        needsLinking: true,
+        uid: verified.uid,
+        email: verified.email,
+        displayName: verified.name || verified.email,
+      });
+      return;
+    }
+
+    const linkData = linkRes.data;
+    const linkedUsername = String(linkData.linkedUsername || '').trim();
+    const linkedRole = String(linkData.linkedRole || '').trim();
+    const linkProof = String(linkData.linkProof || '').trim();
+
+    if (
+      !linkedUsername ||
+      linkedUsername.toLowerCase() === 'admin' ||
+      linkedRole === 'admin' ||
+      String(linkData.email || '').toLowerCase() !== verified.email.toLowerCase() ||
+      !verifyGoogleLinkProof(verified.uid, verified.email, linkedUsername, linkedRole, linkProof)
+    ) {
+      res.json({
+        success: false,
+        needsLinking: true,
+        staleLink: true,
+        uid: verified.uid,
+        email: verified.email,
+        displayName: verified.name || verified.email,
+        message: 'Liên kết Gmail cần được xác nhận lại. Vui lòng chọn tài khoản và nhập mật khẩu để hoàn tất.',
+      });
+      return;
+    }
+
+    const resolved = await resolveNonAdminSystemAccount(linkedUsername);
+    if (!resolved || resolved.accountData.role === 'admin') {
+      res.json({
+        success: false,
+        needsLinking: true,
+        uid: verified.uid,
+        email: verified.email,
+        displayName: verified.name || verified.email,
+        message: 'Tài khoản hệ thống đã liên kết trước đây không còn khả dụng. Vui lòng chọn lại tài khoản.',
+      });
+      return;
+    }
+
+    const userPayload = {
+      username: String(resolved.accountData.username || resolved.username),
+      displayName: String(resolved.accountData.displayName || resolved.username),
+      role: String(resolved.accountData.role || 'phhs'),
+      authMethod: 'google' as const,
+      classId: resolved.accountData.classId ? String(resolved.accountData.classId) : undefined,
+      assignedGroup:
+        typeof resolved.accountData.assignedGroup === 'number'
+          ? resolved.accountData.assignedGroup
+          : undefined,
+      studentId: resolved.accountData.studentId ? String(resolved.accountData.studentId) : undefined,
+      studentName: resolved.accountData.studentName ? String(resolved.accountData.studentName) : undefined,
+    };
+
+    const token = signServerToken(userPayload);
+    res.json({
+      success: true,
+      linkedGoogleEmail: verified.email,
+      token,
+      user: userPayload,
+    });
+  } catch (err) {
+    console.error('Google login error:', err);
+    res.status(500).json({ success: false, message: 'Lỗi xác thực tài khoản Google.' });
+  }
+});
+
+// Link a first-time verified Gmail to 1 non-admin system account after verifying current password
+app.post('/api/auth/link-google-account', async (req: Request, res: Response) => {
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const idToken = typeof body.idToken === 'string' ? body.idToken.trim() : '';
+    const rawUsername = typeof body.username === 'string' ? body.username.trim() : '';
+    const rawPassword = typeof body.password === 'string' ? body.password.trim() : '';
+
+    if (!idToken || !rawUsername || !rawPassword) {
+      res.status(400).json({
+        success: false,
+        message: 'Vui lòng chọn tài khoản hệ thống và nhập mật khẩu xác nhận liên kết.',
+      });
+      return;
+    }
+
+    const verified = await verifyFirebaseIdToken(idToken);
+    if (!verified) {
+      res.status(401).json({
+        success: false,
+        message: 'Phiên Google không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập Google lại.',
+      });
+      return;
+    }
+
+    if (verified.email === ADMIN_EMAIL || rawUsername.toLowerCase() === 'admin') {
+      res.status(403).json({
+        success: false,
+        message: 'Tài khoản Admin không thể liên kết qua luồng tài khoản lớp.',
+      });
+      return;
+    }
+
+    const resolved = await resolveNonAdminSystemAccount(rawUsername);
+    if (!resolved) {
+      res.status(404).json({
+        success: false,
+        message: 'Tài khoản hệ thống được chọn không tồn tại.',
+      });
+      return;
+    }
+
+    if (resolved.accountData.role === 'admin' || resolved.username.toLowerCase() === 'admin') {
+      res.status(403).json({
+        success: false,
+        message: 'Không thể liên kết tài khoản Admin.',
+      });
+      return;
+    }
+
+    const passwordValid = await verifyNonAdminSystemPassword(
+      resolved.username,
+      resolved.accountData,
+      rawPassword
+    );
+    if (!passwordValid) {
+      res.status(401).json({
+        success: false,
+        message: 'Mật khẩu của tài khoản hệ thống không chính xác.',
+      });
+      return;
+    }
+
+    const canonicalUsername = String(resolved.accountData.username || resolved.username);
+    const canonicalRole = String(resolved.accountData.role || 'phhs');
+
+    // Enforce 1-to-1 lock: check if target username is already claimed by another Google UID
+    const reverseLockRes = await firestoreRestGet('username_google_links', canonicalUsername, idToken);
+    if (reverseLockRes.exists && reverseLockRes.data?.uid && reverseLockRes.data.uid !== verified.uid) {
+      res.status(409).json({
+        success: false,
+        message:
+          'Tài khoản hệ thống này đã được liên kết với một Gmail khác. Vui lòng gỡ liên kết cũ trước khi liên kết mới.',
+      });
+      return;
+    }
+
+    // Check if this Google UID had a previous linked username to clean up
+    const existingGoogleLink = await firestoreRestGet('google_account_links', verified.uid, idToken);
+    const previousLinkedUsername =
+      existingGoogleLink.exists && existingGoogleLink.data?.linkedUsername
+        ? String(existingGoogleLink.data.linkedUsername)
+        : null;
+
+    const now = new Date().toISOString();
+    const linkProof = signGoogleLinkProof(verified.uid, verified.email, canonicalUsername, canonicalRole);
+
+    const linkDoc = {
+      uid: verified.uid,
+      email: verified.email,
+      linkedUsername: canonicalUsername,
+      linkedRole: canonicalRole,
+      linkProof,
+      createdAt: existingGoogleLink.data?.createdAt || now,
+      updatedAt: now,
+    };
+
+    const usernameLinkDoc = {
+      username: canonicalUsername,
+      uid: verified.uid,
+      linkedAt: now,
+    };
+
+    const userPayload = {
+      username: canonicalUsername,
+      displayName: String(resolved.accountData.displayName || canonicalUsername),
+      role: canonicalRole,
+      authMethod: 'google' as const,
+      classId: resolved.accountData.classId ? String(resolved.accountData.classId) : undefined,
+      assignedGroup:
+        typeof resolved.accountData.assignedGroup === 'number'
+          ? resolved.accountData.assignedGroup
+          : undefined,
+      studentId: resolved.accountData.studentId ? String(resolved.accountData.studentId) : undefined,
+      studentName: resolved.accountData.studentName ? String(resolved.accountData.studentName) : undefined,
+    };
+
+    const token = signServerToken(userPayload);
+    res.json({
+      success: true,
+      token,
+      user: userPayload,
+      linkedGoogleEmail: verified.email,
+      linkDoc,
+      usernameLinkDoc,
+      previousLinkedUsername:
+        previousLinkedUsername && previousLinkedUsername !== canonicalUsername
+          ? previousLinkedUsername
+          : null,
+    });
+  } catch (err) {
+    console.error('Error linking Google account:', err);
+    res.status(500).json({ success: false, message: 'Lỗi máy chủ khi liên kết tài khoản Google.' });
+  }
+});
+
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
@@ -1014,68 +1460,34 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     }
 
     // 2. Non-admin login: verify PBKDF2 hash from Firestore on server (never trust client check)
-    const serverDb = getServerFirestoreDb();
-    let accSnap = await getDoc(doc(serverDb, 'accounts', rawUsername));
-    if (!accSnap.exists()) {
-      accSnap = await getDoc(doc(serverDb, 'accounts', rawUsername.toLowerCase()));
-    }
-
-    let resolvedUsername = rawUsername;
-    let resolvedAccountData: Record<string, any> | null = accSnap.exists() ? accSnap.data() : null;
-
-    if (!resolvedAccountData) {
-      const allAccsSnap = await getDocs(collection(serverDb, 'accounts'));
-      const matched = allAccsSnap.docs.find(
-        (d) =>
-          d.id.toLowerCase() === rawUsername.toLowerCase() ||
-          String(d.data()?.username || '').toLowerCase() === rawUsername.toLowerCase()
-      );
-      if (matched) {
-        resolvedUsername = matched.id;
-        resolvedAccountData = matched.data();
-      }
-    }
-
-    if (!resolvedAccountData) {
+    const resolved = await resolveNonAdminSystemAccount(rawUsername);
+    if (!resolved) {
       res.status(404).json({ success: false, message: 'Tài khoản không tồn tại trên hệ thống.' });
       return;
     }
+
+    const { username: resolvedUsername, accountData: resolvedAccountData } = resolved;
 
     if (resolvedAccountData.role === 'admin' || resolvedUsername.toLowerCase() === 'admin') {
       res.status(403).json({ success: false, message: 'Tài khoản Admin phải đăng nhập qua xác thực Admin.' });
       return;
     }
 
-    let credSnap = await getDoc(doc(serverDb, 'account_credentials', resolvedUsername));
-    if (!credSnap.exists()) {
-      credSnap = await getDoc(doc(serverDb, 'account_credentials', resolvedUsername.toLowerCase()));
-    }
-
-    if (credSnap.exists()) {
-      const cred = credSnap.data();
-      const valid = verifyPbkdf2Sha256(
-        rawPassword,
-        String(cred.hash || ''),
-        String(cred.salt || ''),
-        typeof cred.iterations === 'number' ? cred.iterations : 100000
-      );
-      if (!valid) {
-        res.status(401).json({ success: false, message: 'Mật khẩu không chính xác.' });
-        return;
-      }
-    } else {
-      const legacyPass = typeof resolvedAccountData.password === 'string' ? resolvedAccountData.password : '';
-      const validLegacy = legacyPass ? timingSafeStringEqual(rawPassword, legacyPass) : rawPassword === '12345678';
-      if (!validLegacy) {
-        res.status(401).json({ success: false, message: 'Mật khẩu không chính xác.' });
-        return;
-      }
+    const validPassword = await verifyNonAdminSystemPassword(
+      resolvedUsername,
+      resolvedAccountData,
+      rawPassword
+    );
+    if (!validPassword) {
+      res.status(401).json({ success: false, message: 'Mật khẩu không chính xác.' });
+      return;
     }
 
     const userPayload = {
       username: String(resolvedAccountData.username || resolvedUsername),
       displayName: String(resolvedAccountData.displayName || resolvedUsername),
       role: String(resolvedAccountData.role || 'phhs'),
+      authMethod: 'password' as const,
       classId: resolvedAccountData.classId ? String(resolvedAccountData.classId) : undefined,
       assignedGroup: typeof resolvedAccountData.assignedGroup === 'number' ? resolvedAccountData.assignedGroup : undefined,
       studentId: resolvedAccountData.studentId ? String(resolvedAccountData.studentId) : undefined,
