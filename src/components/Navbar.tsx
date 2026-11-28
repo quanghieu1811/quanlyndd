@@ -578,7 +578,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     Đổi mật khẩu
                   </button>
 
-                  {linkedGoogleEmail && currentUser.role !== 'admin' && (
+                  {linkedGoogleEmail && (
                     <button
                       onClick={async () => {
                         await unlinkGoogleAccount();

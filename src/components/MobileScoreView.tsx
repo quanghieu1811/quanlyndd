@@ -3648,7 +3648,7 @@ export const MobileScoreView: React.FC<MobileScoreViewProps> = ({
                       <KeyRound className="w-4 h-4 text-amber-600" />
                       <span>Đổi mật khẩu</span>
                     </button>
-                    {linkedGoogleEmail && currentUser.role !== 'admin' && (
+                    {linkedGoogleEmail && (
                       <button
                         type="button"
                         onClick={async () => {

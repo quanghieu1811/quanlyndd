@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { UserAccount } from '../types.ts';
+import firebaseConfigData from '../../firebase-applet-config.json';
 import {
   Lock,
   User,
@@ -14,6 +15,10 @@ import {
   Search,
   Link2,
   ArrowLeft,
+  Copy,
+  Check,
+  ExternalLink,
+  Globe,
 } from 'lucide-react';
 
 interface LoginModalProps {
@@ -24,6 +29,7 @@ interface LoginModalProps {
 }
 
 const ROLE_LABELS: Record<string, string> = {
+  admin: 'Quản trị viên (Admin)',
   gvcn: 'GVCN',
   loptruong: 'Lớp trưởng',
   loppho: 'Lớp phó',
@@ -59,6 +65,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [unauthorizedDomain, setUnauthorizedDomain] = useState<string | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+
+  const firebaseProjectId = firebaseConfigData.projectId || 'sharp-xenops-k8chg';
 
   // First-time Gmail linking state
   const [classFilter, setClassFilter] = useState<string>(selectedClassId || 'ALL');
@@ -70,6 +80,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     if (isOpen) {
       refreshAdminStatus().catch(() => {});
       setError(null);
+      setUnauthorizedDomain(null);
+      setCopiedDomain(false);
       setSetupMode(false);
       setConfirmSetupPassword('');
       if (selectedClassId) {
@@ -87,20 +99,40 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   }, [pendingGoogleUser?.uid]);
 
   const linkableAccounts = useMemo(() => {
-    return (accounts || []).filter((acc) => acc && acc.role !== 'admin' && acc.username.toLowerCase() !== 'admin');
+    const list: UserAccount[] = [
+      {
+        username: 'admin',
+        displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+        role: 'admin',
+      },
+      ...(accounts || []).filter((acc) => acc && acc.username.toLowerCase() !== 'admin'),
+    ];
+    const seen = new Set<string>();
+    return list.filter((a) => {
+      const lower = a.username.toLowerCase();
+      if (seen.has(lower)) return false;
+      seen.add(lower);
+      return true;
+    });
   }, [accounts]);
 
   const availableClasses = useMemo(() => {
     const set = new Set<string>();
     linkableAccounts.forEach((acc) => {
-      set.add(acc.classId || '8A1');
+      if (acc.classId) {
+        set.add(acc.classId);
+      }
     });
+    if (set.size === 0) {
+      set.add('8A1');
+    }
     return Array.from(set).sort();
   }, [linkableAccounts]);
 
   const filteredLinkAccounts = useMemo(() => {
     const q = accountSearch.trim().toLowerCase();
     const rolePriority = (role: string) => {
+      if (role === 'admin') return 0;
       if (role === 'gvcn') return 1;
       if (role === 'loptruong') return 2;
       if (role === 'loppho') return 3;
@@ -111,7 +143,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     return linkableAccounts
       .filter((acc) => {
         const cls = acc.classId || '8A1';
-        if (classFilter !== 'ALL' && cls !== classFilter) return false;
+        // Admin accounts are system-wide, so keep Admin visible across any class filter
+        if (acc.role !== 'admin' && classFilter !== 'ALL' && cls !== classFilter) return false;
         if (!q) return true;
         return (
           acc.username.toLowerCase().includes(q) ||
@@ -195,16 +228,31 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   const handleGoogleLogin = async () => {
     setError(null);
+    setUnauthorizedDomain(null);
     setGoogleLoading(true);
     try {
       const res = await loginWithGoogle();
       if (res.success) {
         if (onClose) onClose();
+      } else if (res.isUnauthorizedDomain) {
+        setUnauthorizedDomain(
+          res.unauthorizedDomain || (typeof window !== 'undefined' ? window.location.hostname : '')
+        );
+        setError(res.message || 'Tên miền chưa được thêm vào Authorized Domains.');
       } else if (!res.needsLinking) {
         setError(res.message || 'Đăng nhập Google thất bại.');
       }
     } catch (err: any) {
-      setError(err.message || 'Lỗi khi xác thực Google.');
+      if (
+        err?.code === 'auth/unauthorized-domain' ||
+        String(err?.message || '').includes('auth/unauthorized-domain')
+      ) {
+        const dom = typeof window !== 'undefined' ? window.location.hostname : '';
+        setUnauthorizedDomain(dom);
+        setError(`Tên miền hiện tại (${dom}) chưa được thêm vào Authorized Domains của Firebase Authentication.`);
+      } else {
+        setError(err.message || 'Lỗi khi xác thực Google.');
+      }
     } finally {
       setGoogleLoading(false);
     }
@@ -290,12 +338,82 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
         )}
 
-        {error && (
+        {unauthorizedDomain ? (
+          <div className="mb-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 p-3.5 text-xs text-amber-900 dark:text-amber-200 border border-amber-200 dark:border-amber-800 space-y-2.5">
+            <div className="flex items-start gap-2">
+              <Globe className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold block text-amber-900 dark:text-amber-100">
+                  Cần thêm tên miền vào Firebase Authentication
+                </span>
+                <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-0.5 leading-relaxed">
+                  Để đảm bảo an toàn, Google yêu cầu tên miền ứng dụng phải được cấp phép trong danh sách <b>Authorized domains</b> của dự án Firebase (<b>{firebaseProjectId}</b>).
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-white dark:bg-slate-900/80 rounded-xl p-2 border border-amber-200/80 dark:border-amber-800/80 flex items-center justify-between gap-2">
+              <code className="text-[11px] font-mono font-bold text-slate-800 dark:text-slate-100 truncate">
+                {unauthorizedDomain}
+              </code>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(unauthorizedDomain);
+                    setCopiedDomain(true);
+                    setTimeout(() => setCopiedDomain(false), 2000);
+                  } catch {}
+                }}
+                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/60 hover:bg-amber-200 dark:hover:bg-amber-800/60 text-amber-900 dark:text-amber-200 text-[10px] font-bold transition cursor-pointer"
+              >
+                {copiedDomain ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                    <span>Đã chép!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Sao chép</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="text-[11px] text-amber-800 dark:text-amber-300 space-y-1">
+              <p className="font-semibold text-amber-900 dark:text-amber-100">Cách xử lý nhanh (khoảng 30 giây):</p>
+              <ol className="list-decimal pl-4 space-y-0.5 text-[10.5px]">
+                <li>
+                  Mở trang{' '}
+                  <a
+                    href={`https://console.firebase.google.com/project/${firebaseProjectId}/authentication/settings`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold underline text-blue-600 dark:text-blue-400 inline-flex items-center gap-0.5"
+                  >
+                    <span>Cài đặt Firebase Authentication</span>
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                </li>
+                <li>
+                  Kéo xuống mục <b>Miền được ủy quyền (Authorized domains)</b> &rarr; bấm <b>Thêm miền (Add domain)</b>.
+                </li>
+                <li>
+                  Dán tên miền ở khung trên vào và bấm <b>Lưu (Save)</b>.
+                </li>
+                <li>
+                  Quay lại đây bấm <b>Đăng nhập bằng Google (Gmail)</b> là vào được ngay!
+                </li>
+              </ol>
+            </div>
+          </div>
+        ) : error ? (
           <div className="mb-4 flex items-center gap-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 p-3 text-xs text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>{error}</span>
           </div>
-        )}
+        ) : null}
 
         {pendingGoogleUser ? (
           <form onSubmit={handleConfirmLinkGoogle} className="space-y-3.5">

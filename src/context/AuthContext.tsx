@@ -32,8 +32,20 @@ interface AuthContextType {
     username: string,
     password: string
   ) => Promise<{ success: boolean; message?: string; requiresSetup?: boolean }>;
-  loginWithGoogle: () => Promise<{ success: boolean; needsLinking?: boolean; message?: string }>;
-  loginWithGoogleAdmin: () => Promise<{ success: boolean; needsLinking?: boolean; message?: string }>;
+  loginWithGoogle: () => Promise<{
+    success: boolean;
+    needsLinking?: boolean;
+    isUnauthorizedDomain?: boolean;
+    unauthorizedDomain?: string;
+    message?: string;
+  }>;
+  loginWithGoogleAdmin: () => Promise<{
+    success: boolean;
+    needsLinking?: boolean;
+    isUnauthorizedDomain?: boolean;
+    unauthorizedDomain?: string;
+    message?: string;
+  }>;
   linkGoogleToAccount: (
     username: string,
     password: string
@@ -251,6 +263,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithGoogle = async (): Promise<{
     success: boolean;
     needsLinking?: boolean;
+    isUnauthorizedDomain?: boolean;
+    unauthorizedDomain?: string;
     message?: string;
   }> => {
     googlePopupInFlightRef.current = true;
@@ -260,6 +274,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err: any) {
       if (err?.code === 'auth/popup-closed-by-user') {
         return { success: false, message: 'Bạn đã đóng cửa sổ đăng nhập Google.' };
+      }
+      const isUnauthorized =
+        err?.code === 'auth/unauthorized-domain' ||
+        String(err?.message || '').includes('auth/unauthorized-domain');
+      if (isUnauthorized) {
+        const domain = typeof window !== 'undefined' ? window.location.hostname : '';
+        return {
+          success: false,
+          isUnauthorizedDomain: true,
+          unauthorizedDomain: domain,
+          message: `Tên miền hiện tại (${domain}) chưa được thêm vào danh sách Miền được ủy quyền (Authorized Domains) của Firebase Authentication.`,
+        };
       }
       return { success: false, message: err?.message || 'Đăng nhập Google thất bại.' };
     } finally {
@@ -318,10 +344,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       setInMemoryBearerToken(data.token);
-      setIsFirebaseAdmin(false);
+      const isLinkedAdmin = data.user.role === 'admin';
+      setIsFirebaseAdmin(isLinkedAdmin);
       setPendingGoogleUser(null);
       setLinkedGoogleEmail(data.linkedGoogleEmail || fbUser.email || null);
       setCurrentUser(mapServerUser(data.user));
+      if (isLinkedAdmin) {
+        initializeDatabase().catch(() => {});
+      }
       return { success: true };
     } catch (err) {
       console.error('Failed to link Google account:', err);
@@ -340,8 +370,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const unlinkGoogleAccount = async (): Promise<{ success: boolean; message?: string }> => {
-    if (!currentUser || currentUser.role === 'admin') {
-      return { success: false, message: 'Không thể gỡ liên kết cho tài khoản này.' };
+    if (!currentUser) {
+      return { success: false, message: 'Chưa đăng nhập.' };
     }
     const fbUser = auth.currentUser;
     if (!fbUser) {
@@ -356,6 +386,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setLinkedGoogleEmail(null);
     setPendingGoogleUser(null);
+    setIsFirebaseAdmin(false);
     await signOut(auth).catch(() => {});
     return {
       success: true,

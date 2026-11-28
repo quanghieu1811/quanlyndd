@@ -1183,24 +1183,6 @@ app.post('/api/auth/google-login', async (req: Request, res: Response) => {
       return;
     }
 
-    if (verified.email === ADMIN_EMAIL) {
-      const adminUser = {
-        username: 'admin',
-        displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
-        role: 'admin',
-        authMethod: 'google' as const,
-      };
-      const token = signServerToken(adminUser);
-      res.json({
-        success: true,
-        isAdmin: true,
-        linkedGoogleEmail: verified.email,
-        token,
-        user: adminUser,
-      });
-      return;
-    }
-
     const linkRes = await firestoreRestGet('google_account_links', verified.uid, idToken);
     if (!linkRes.exists || !linkRes.data) {
       res.json({
@@ -1220,8 +1202,6 @@ app.post('/api/auth/google-login', async (req: Request, res: Response) => {
 
     if (
       !linkedUsername ||
-      linkedUsername.toLowerCase() === 'admin' ||
-      linkedRole === 'admin' ||
       String(linkData.email || '').toLowerCase() !== verified.email.toLowerCase() ||
       !verifyGoogleLinkProof(verified.uid, verified.email, linkedUsername, linkedRole, linkProof)
     ) {
@@ -1233,6 +1213,24 @@ app.post('/api/auth/google-login', async (req: Request, res: Response) => {
         email: verified.email,
         displayName: verified.name || verified.email,
         message: 'Liên kết Gmail cần được xác nhận lại. Vui lòng chọn tài khoản và nhập mật khẩu để hoàn tất.',
+      });
+      return;
+    }
+
+    if (linkedUsername.toLowerCase() === 'admin' || linkedRole === 'admin') {
+      const adminUser = {
+        username: 'admin',
+        displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+        role: 'admin',
+        authMethod: 'google' as const,
+      };
+      const token = signServerToken(adminUser);
+      res.json({
+        success: true,
+        isAdmin: true,
+        linkedGoogleEmail: verified.email,
+        token,
+        user: adminUser,
       });
       return;
     }
@@ -1277,7 +1275,7 @@ app.post('/api/auth/google-login', async (req: Request, res: Response) => {
   }
 });
 
-// Link a first-time verified Gmail to 1 non-admin system account after verifying current password
+// Link a first-time verified Gmail to 1 system account (including Admin) after verifying current password
 app.post('/api/auth/link-google-account', async (req: Request, res: Response) => {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
@@ -1302,46 +1300,82 @@ app.post('/api/auth/link-google-account', async (req: Request, res: Response) =>
       return;
     }
 
-    if (verified.email === ADMIN_EMAIL || rawUsername.toLowerCase() === 'admin') {
-      res.status(403).json({
-        success: false,
-        message: 'Tài khoản Admin không thể liên kết qua luồng tài khoản lớp.',
-      });
-      return;
-    }
+    let canonicalUsername = '';
+    let canonicalRole = '';
+    let userPayload: any = null;
 
-    const resolved = await resolveNonAdminSystemAccount(rawUsername);
-    if (!resolved) {
-      res.status(404).json({
-        success: false,
-        message: 'Tài khoản hệ thống được chọn không tồn tại.',
-      });
-      return;
-    }
+    if (rawUsername.toLowerCase() === 'admin') {
+      const envPass = getConfiguredAdminPassword();
+      let validAdmin = false;
+      if (envPass) {
+        validAdmin = timingSafeStringEqual(rawPassword, envPass);
+      } else if (claimedAdminCred) {
+        const computed = hashScryptPassword(rawPassword, claimedAdminCred.salt);
+        validAdmin = timingSafeStringEqual(computed, claimedAdminCred.hash);
+      } else {
+        res.status(403).json({
+          success: false,
+          requiresSetup: true,
+          message: 'Tài khoản Admin chưa được khởi tạo mật khẩu trên máy chủ. Vui lòng thiết lập mật khẩu Admin trước.',
+        });
+        return;
+      }
 
-    if (resolved.accountData.role === 'admin' || resolved.username.toLowerCase() === 'admin') {
-      res.status(403).json({
-        success: false,
-        message: 'Không thể liên kết tài khoản Admin.',
-      });
-      return;
-    }
+      if (!validAdmin) {
+        res.status(401).json({
+          success: false,
+          message: 'Mật khẩu tài khoản Admin không chính xác.',
+        });
+        return;
+      }
 
-    const passwordValid = await verifyNonAdminSystemPassword(
-      resolved.username,
-      resolved.accountData,
-      rawPassword
-    );
-    if (!passwordValid) {
-      res.status(401).json({
-        success: false,
-        message: 'Mật khẩu của tài khoản hệ thống không chính xác.',
-      });
-      return;
-    }
+      canonicalUsername = 'admin';
+      canonicalRole = 'admin';
+      userPayload = {
+        username: 'admin',
+        displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
+        role: 'admin',
+        authMethod: 'google' as const,
+      };
+    } else {
+      const resolved = await resolveNonAdminSystemAccount(rawUsername);
+      if (!resolved) {
+        res.status(404).json({
+          success: false,
+          message: 'Tài khoản hệ thống được chọn không tồn tại.',
+        });
+        return;
+      }
 
-    const canonicalUsername = String(resolved.accountData.username || resolved.username);
-    const canonicalRole = String(resolved.accountData.role || 'phhs');
+      const passwordValid = await verifyNonAdminSystemPassword(
+        resolved.username,
+        resolved.accountData,
+        rawPassword
+      );
+      if (!passwordValid) {
+        res.status(401).json({
+          success: false,
+          message: 'Mật khẩu của tài khoản hệ thống không chính xác.',
+        });
+        return;
+      }
+
+      canonicalUsername = String(resolved.accountData.username || resolved.username);
+      canonicalRole = String(resolved.accountData.role || 'phhs');
+      userPayload = {
+        username: canonicalUsername,
+        displayName: String(resolved.accountData.displayName || canonicalUsername),
+        role: canonicalRole,
+        authMethod: 'google' as const,
+        classId: resolved.accountData.classId ? String(resolved.accountData.classId) : undefined,
+        assignedGroup:
+          typeof resolved.accountData.assignedGroup === 'number'
+            ? resolved.accountData.assignedGroup
+            : undefined,
+        studentId: resolved.accountData.studentId ? String(resolved.accountData.studentId) : undefined,
+        studentName: resolved.accountData.studentName ? String(resolved.accountData.studentName) : undefined,
+      };
+    }
 
     // Enforce 1-to-1 lock: check if target username is already claimed by another Google UID
     const reverseLockRes = await firestoreRestGet('username_google_links', canonicalUsername, idToken);
@@ -1349,7 +1383,7 @@ app.post('/api/auth/link-google-account', async (req: Request, res: Response) =>
       res.status(409).json({
         success: false,
         message:
-          'Tài khoản hệ thống này đã được liên kết với một Gmail khác. Vui lòng gỡ liên kết cũ trước khi liên kết mới.',
+          `Tài khoản @${canonicalUsername} này đã được liên kết với một Gmail khác. Vui lòng gỡ liên kết cũ trước khi liên kết mới.`,
       });
       return;
     }
@@ -1378,20 +1412,6 @@ app.post('/api/auth/link-google-account', async (req: Request, res: Response) =>
       username: canonicalUsername,
       uid: verified.uid,
       linkedAt: now,
-    };
-
-    const userPayload = {
-      username: canonicalUsername,
-      displayName: String(resolved.accountData.displayName || canonicalUsername),
-      role: canonicalRole,
-      authMethod: 'google' as const,
-      classId: resolved.accountData.classId ? String(resolved.accountData.classId) : undefined,
-      assignedGroup:
-        typeof resolved.accountData.assignedGroup === 'number'
-          ? resolved.accountData.assignedGroup
-          : undefined,
-      studentId: resolved.accountData.studentId ? String(resolved.accountData.studentId) : undefined,
-      studentName: resolved.accountData.studentName ? String(resolved.accountData.studentName) : undefined,
     };
 
     const token = signServerToken(userPayload);

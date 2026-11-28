@@ -290,7 +290,7 @@
         "uid": { "type": "string", "maxLength": 128 },
         "email": { "type": "string", "maxLength": 200 },
         "linkedUsername": { "type": "string", "maxLength": 128 },
-        "linkedRole": { "type": "string", "enum": ["gvcn", "loptruong", "loppho", "to1", "to2", "to3", "to4", "phhs"] },
+        "linkedRole": { "type": "string", "enum": ["admin", "gvcn", "loptruong", "loppho", "to1", "to2", "to3", "to4", "phhs"] },
         "linkProof": { "type": "string", "maxLength": 256 },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
