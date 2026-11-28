@@ -6,6 +6,7 @@ import firebaseConfigData from '../../firebase-applet-config.json';
 const env: Record<string, string | undefined> =
   import.meta.env || (typeof process !== 'undefined' ? process.env : {}) || {};
 
+export const ADMIN_EMAILS = ['quanghieun370@gmail.com', 'quanghieu18112013@gmail.com'];
 export const ADMIN_EMAIL = 'quanghieun370@gmail.com';
 
 export const firebaseConfig = {

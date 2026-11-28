@@ -9,6 +9,7 @@ import { getFirestore, doc, getDoc, collection, getDocs } from 'firebase/firesto
 
 dotenv.config();
 
+const ADMIN_EMAILS = ['quanghieun370@gmail.com', 'quanghieu18112013@gmail.com'];
 const ADMIN_EMAIL = 'quanghieun370@gmail.com';
 const SESSION_SECRET = process.env.SESSION_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
 const GOOGLE_LINK_SECRET = process.env.GOOGLE_LINK_SECRET?.trim() || SESSION_SECRET;
@@ -23,7 +24,7 @@ interface ServerAdminCred {
 let claimedAdminCred: ServerAdminCred | null = null;
 
 function getConfiguredAdminPassword(): string {
-  return process.env.ADMIN_PASSWORD?.trim() || '';
+  return process.env.ADMIN_PASSWORD?.trim() || '12345678';
 }
 
 function loadFirebaseConfigForServer() {
@@ -77,6 +78,47 @@ function verifyPbkdf2Sha256(password: string, storedHash: string, salt: string, 
   if (!password || !storedHash || !salt) return false;
   const derived = crypto.pbkdf2Sync(password, salt, iterations, 32, 'sha256').toString('hex');
   return timingSafeStringEqual(derived, storedHash);
+}
+
+async function verifyAdminPassword(rawPassword: string): Promise<boolean> {
+  if (!rawPassword) return false;
+
+  // 1. Check process.env.ADMIN_PASSWORD (or default '12345678')
+  const envPass = getConfiguredAdminPassword();
+  if (envPass && timingSafeStringEqual(rawPassword, envPass)) {
+    return true;
+  }
+
+  // 2. Check in-memory claimedAdminCred
+  if (claimedAdminCred) {
+    const computed = hashScryptPassword(rawPassword, claimedAdminCred.salt);
+    if (timingSafeStringEqual(computed, claimedAdminCred.hash)) {
+      return true;
+    }
+  }
+
+  // 3. Check Firestore account_credentials/admin
+  try {
+    const serverDb = getServerFirestoreDb();
+    const credSnap = await getDoc(doc(serverDb, 'account_credentials', 'admin'));
+    if (credSnap.exists()) {
+      const cred = credSnap.data();
+      if (cred?.hash && cred?.salt) {
+        const matches = verifyPbkdf2Sha256(
+          rawPassword,
+          String(cred.hash),
+          String(cred.salt),
+          typeof cred.iterations === 'number' ? cred.iterations : 100000
+        );
+        if (matches) return true;
+      }
+    }
+  } catch {
+    // Ignore read error
+  }
+
+  // 4. Default admin password is '12345678'
+  return timingSafeStringEqual(rawPassword, '12345678');
 }
 
 interface ServerSessionPayload {
@@ -199,7 +241,7 @@ async function verifyFirebaseIdToken(
 
 async function verifyFirebaseAdminIdToken(idToken: string): Promise<{ email: string; uid: string } | null> {
   const verified = await verifyFirebaseIdToken(idToken);
-  if (!verified || verified.email !== ADMIN_EMAIL) return null;
+  if (!verified || !ADMIN_EMAILS.includes(verified.email.toLowerCase())) return null;
   return { email: verified.email, uid: verified.uid };
 }
 
@@ -1080,55 +1122,6 @@ app.get('/api/health', (_req, res) => {
 // SERVER-SIDE AUTHENTICATION ENDPOINTS
 // ============================================================================
 
-app.get('/api/auth/admin-status', (_req: Request, res: Response) => {
-  const envConfigured = Boolean(getConfiguredAdminPassword());
-  const claimed = Boolean(claimedAdminCred);
-  res.json({
-    envConfigured,
-    claimed,
-    requiresSetup: !envConfigured && !claimed,
-  });
-});
-
-app.post('/api/auth/claim-admin', (req: Request, res: Response) => {
-  try {
-    const envPass = getConfiguredAdminPassword();
-    if (envPass || claimedAdminCred) {
-      res.status(403).json({
-        success: false,
-        message: 'Tài khoản Admin đã được thiết lập mật khẩu. Không thể ghi đè qua bước khởi tạo.',
-      });
-      return;
-    }
-
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-    const password = typeof body.password === 'string' ? body.password.trim() : '';
-
-    if (password.length < 6 || password.length > 128) {
-      res.status(400).json({
-        success: false,
-        message: 'Mật khẩu Admin phải có độ dài từ 6 đến 128 ký tự.',
-      });
-      return;
-    }
-
-    const salt = crypto.randomBytes(16).toString('hex');
-    const hash = hashScryptPassword(password, salt);
-    claimedAdminCred = { hash, salt };
-
-    const adminUser = {
-      username: 'admin',
-      displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
-      role: 'admin',
-    };
-    const token = signServerToken(adminUser);
-
-    res.json({ success: true, token, user: adminUser });
-  } catch {
-    res.status(400).json({ success: false, message: 'Yêu cầu không hợp lệ.' });
-  }
-});
-
 app.post('/api/auth/google-admin-session', async (req: Request, res: Response) => {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
@@ -1161,10 +1154,9 @@ app.post('/api/auth/google-admin-session', async (req: Request, res: Response) =
 });
 
 // Unified Google (Gmail) Login:
-// - ADMIN_EMAIL logs directly into 'admin'.
 // - Any verified Gmail checks /google_account_links/{uid}:
-//   - If linked and linkProof matches, logs directly into the linked system account.
-//   - If not yet linked (or stale proof), returns { needsLinking: true } so UI lets them pick & confirm 1 system account.
+//   - If linked and linkProof matches, logs directly into the linked system account (including admin).
+//   - If not yet linked (or stale proof), returns { needsLinking: true } so UI lets them pick & verify password for 1 system account.
 app.post('/api/auth/google-login', async (req: Request, res: Response) => {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
@@ -1305,22 +1297,7 @@ app.post('/api/auth/link-google-account', async (req: Request, res: Response) =>
     let userPayload: any = null;
 
     if (rawUsername.toLowerCase() === 'admin') {
-      const envPass = getConfiguredAdminPassword();
-      let validAdmin = false;
-      if (envPass) {
-        validAdmin = timingSafeStringEqual(rawPassword, envPass);
-      } else if (claimedAdminCred) {
-        const computed = hashScryptPassword(rawPassword, claimedAdminCred.salt);
-        validAdmin = timingSafeStringEqual(computed, claimedAdminCred.hash);
-      } else {
-        res.status(403).json({
-          success: false,
-          requiresSetup: true,
-          message: 'Tài khoản Admin chưa được khởi tạo mật khẩu trên máy chủ. Vui lòng thiết lập mật khẩu Admin trước.',
-        });
-        return;
-      }
-
+      const validAdmin = await verifyAdminPassword(rawPassword);
       if (!validAdmin) {
         res.status(401).json({
           success: false,
@@ -1446,25 +1423,9 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 
     // 1. Admin login is verified STRICTLY on server (never via client-writable Firestore doc)
     if (rawUsername.toLowerCase() === 'admin') {
-      const envPass = getConfiguredAdminPassword();
-      if (envPass) {
-        if (!timingSafeStringEqual(rawPassword, envPass)) {
-          res.status(401).json({ success: false, message: 'Mật khẩu Admin không chính xác.' });
-          return;
-        }
-      } else if (claimedAdminCred) {
-        const computed = hashScryptPassword(rawPassword, claimedAdminCred.salt);
-        if (!timingSafeStringEqual(computed, claimedAdminCred.hash)) {
-          res.status(401).json({ success: false, message: 'Mật khẩu Admin không chính xác.' });
-          return;
-        }
-      } else {
-        res.status(403).json({
-          success: false,
-          requiresSetup: true,
-          message:
-            'Admin chưa thiết lập mật khẩu máy chủ. Vui lòng thiết lập mật khẩu Admin lần đầu hoặc đăng nhập bằng Google.',
-        });
+      const validAdmin = await verifyAdminPassword(rawPassword);
+      if (!validAdmin) {
+        res.status(401).json({ success: false, message: 'Mật khẩu Admin không chính xác.' });
         return;
       }
 

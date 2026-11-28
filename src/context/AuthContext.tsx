@@ -25,13 +25,12 @@ interface AuthContextType {
   accounts: UserAccount[];
   loading: boolean;
   isFirebaseAdmin: boolean;
-  adminRequiresSetup: boolean;
   pendingGoogleUser: PendingGoogleUser | null;
   linkedGoogleEmail: string | null;
   login: (
     username: string,
     password: string
-  ) => Promise<{ success: boolean; message?: string; requiresSetup?: boolean }>;
+  ) => Promise<{ success: boolean; message?: string }>;
   loginWithGoogle: () => Promise<{
     success: boolean;
     needsLinking?: boolean;
@@ -52,14 +51,12 @@ interface AuthContextType {
   ) => Promise<{ success: boolean; message?: string }>;
   cancelGoogleLinking: () => Promise<void>;
   unlinkGoogleAccount: () => Promise<{ success: boolean; message?: string }>;
-  claimAdminPassword: (password: string) => Promise<{ success: boolean; message?: string }>;
   logout: () => Promise<void>;
   changePassword: (oldPass: string, newPass: string) => Promise<{ success: boolean; message?: string }>;
   resetUserPasswordAsAdmin: (
     targetUsername: string,
     newPass: string
   ) => Promise<{ success: boolean; message?: string }>;
-  refreshAdminStatus: () => Promise<boolean>;
   isAllPermitted: boolean;
   isTeacherOrAdmin: boolean; // Chỉ Admin hoặc GVCN
   isGvcn: boolean; // GVCN
@@ -70,12 +67,6 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const ADMIN_USER_PROFILE: UserAccount = {
-  username: 'admin',
-  displayName: 'Nguyễn Quang Hiếu (Phụ trách CNTT & Admin)',
-  role: 'admin',
-};
 
 function mapServerUser(rawUser: any): UserAccount {
   return {
@@ -94,25 +85,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [accounts, setAccounts] = useState<UserAccount[]>(DEFAULT_ACCOUNTS);
   const [loading, setLoading] = useState(true);
   const [isFirebaseAdmin, setIsFirebaseAdmin] = useState(false);
-  const [adminRequiresSetup, setAdminRequiresSetup] = useState(false);
   const [pendingGoogleUser, setPendingGoogleUser] = useState<PendingGoogleUser | null>(null);
   const [linkedGoogleEmail, setLinkedGoogleEmail] = useState<string | null>(null);
   const googlePopupInFlightRef = useRef(false);
-
-  const refreshAdminStatus = async (): Promise<boolean> => {
-    try {
-      const resp = await fetch('/api/auth/admin-status');
-      if (resp.ok) {
-        const data = await resp.json();
-        const needsSetup = Boolean(data?.requiresSetup);
-        setAdminRequiresSetup(needsSetup);
-        return needsSetup;
-      }
-    } catch {
-      // Ignore network status check failure
-    }
-    return false;
-  };
 
   const loadData = async () => {
     try {
@@ -125,7 +100,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await initializeDatabase();
       const accList = await getAccounts();
       setAccounts(accList);
-      await refreshAdminStatus();
     } catch (e) {
       console.error('Error in AuthProvider loadData:', e);
     } finally {
@@ -159,7 +133,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (resp.ok && data?.success && data?.token && data?.user) {
         setInMemoryBearerToken(data.token);
         const mappedUser = mapServerUser(data.user);
-        const isAdmin = mappedUser.role === 'admin' && firebaseUser.email === ADMIN_EMAIL;
+        const isAdmin = mappedUser.role === 'admin';
         setIsFirebaseAdmin(isAdmin);
         setPendingGoogleUser(null);
         setLinkedGoogleEmail(data.linkedGoogleEmail || firebaseUser.email);
@@ -222,7 +196,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = async (
     username: string,
     pass: string
-  ): Promise<{ success: boolean; message?: string; requiresSetup?: boolean }> => {
+  ): Promise<{ success: boolean; message?: string }> => {
     const rawInput = username.trim();
     const rawPass = pass.trim();
     if (!rawInput || !rawPass) {
@@ -239,12 +213,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const data = await resp.json().catch(() => ({}));
 
       if (!resp.ok || !data?.success || !data?.token || !data?.user) {
-        if (data?.requiresSetup) {
-          setAdminRequiresSetup(true);
-        }
         return {
           success: false,
-          requiresSetup: Boolean(data?.requiresSetup),
           message: data?.message || 'Tên đăng nhập hoặc mật khẩu không chính xác.',
         };
       }
@@ -394,31 +364,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   };
 
-  const claimAdminPassword = async (password: string): Promise<{ success: boolean; message?: string }> => {
-    const cleanPass = password.trim();
-    if (cleanPass.length < 6) {
-      return { success: false, message: 'Mật khẩu Admin phải có ít nhất 6 ký tự.' };
-    }
-    try {
-      const resp = await fetch('/api/auth/claim-admin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: cleanPass }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data?.success || !data?.token) {
-        return { success: false, message: data?.message || 'Không thể thiết lập mật khẩu Admin.' };
-      }
-      setInMemoryBearerToken(data.token);
-      setAdminRequiresSetup(false);
-      setPendingGoogleUser(null);
-      setCurrentUser(ADMIN_USER_PROFILE);
-      return { success: true };
-    } catch {
-      return { success: false, message: 'Không thể kết nối máy chủ để thiết lập Admin.' };
-    }
-  };
-
   const logout = async () => {
     setInMemoryBearerToken(null);
     setCurrentUser(null);
@@ -466,7 +411,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (data.token) {
             setInMemoryBearerToken(data.token);
           }
-          setAdminRequiresSetup(false);
           return {
             success: true,
             message: data.message || 'Đổi mật khẩu Admin thành công trên máy chủ!',
@@ -564,7 +508,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         accounts,
         loading,
         isFirebaseAdmin,
-        adminRequiresSetup,
         pendingGoogleUser,
         linkedGoogleEmail,
         login,
@@ -573,11 +516,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         linkGoogleToAccount,
         cancelGoogleLinking,
         unlinkGoogleAccount,
-        claimAdminPassword,
         logout,
         changePassword,
         resetUserPasswordAsAdmin,
-        refreshAdminStatus,
         isAllPermitted,
         isTeacherOrAdmin,
         isGvcn,

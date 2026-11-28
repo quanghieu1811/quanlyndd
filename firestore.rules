@@ -28,7 +28,11 @@ service cloud.firestore {
     }
 
     function isFirebaseAdmin() {
-      return isVerifiedEmail() && request.auth.token.email == 'quanghieun370@gmail.com';
+      return isVerifiedEmail() && (
+        request.auth.token.email in ['quanghieun370@gmail.com', 'quanghieu18112013@gmail.com'] ||
+        (exists(/databases/$(database)/documents/google_account_links/$(request.auth.uid))
+          && get(/databases/$(database)/documents/google_account_links/$(request.auth.uid)).data.linkedRole == 'admin')
+      );
     }
 
     function isAdminUsername(username) {

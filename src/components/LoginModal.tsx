@@ -53,15 +53,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     loginWithGoogle,
     linkGoogleToAccount,
     cancelGoogleLinking,
-    claimAdminPassword,
-    adminRequiresSetup,
-    refreshAdminStatus,
   } = useAuth();
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmSetupPassword, setConfirmSetupPassword] = useState('');
-  const [setupMode, setSetupMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -78,23 +73,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      refreshAdminStatus().catch(() => {});
       setError(null);
       setUnauthorizedDomain(null);
       setCopiedDomain(false);
-      setSetupMode(false);
-      setConfirmSetupPassword('');
       if (selectedClassId) {
         setClassFilter(selectedClassId);
       }
     }
   }, [isOpen, selectedClassId]);
 
-  // Reset link password & errors when pendingGoogleUser changes
+  // Reset link selection, password & errors when pendingGoogleUser changes
   useEffect(() => {
     if (pendingGoogleUser) {
       setError(null);
       setLinkPassword('');
+      setSelectedLinkUsername('');
+      setAccountSearch('');
     }
   }, [pendingGoogleUser?.uid]);
 
@@ -167,9 +161,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   if (!isOpen) return null;
 
-  const isTypingAdmin = username.trim().toLowerCase() === 'admin';
-  const showFirstRunSetup = !pendingGoogleUser && (setupMode || (isTypingAdmin && adminRequiresSetup));
-
   const handleCloseModal = async () => {
     if (pendingGoogleUser) {
       await cancelGoogleLinking();
@@ -181,40 +172,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if (showFirstRunSetup) {
-      if (password.trim().length < 6) {
-        setError('Mật khẩu Admin phải có ít nhất 6 ký tự.');
-        return;
-      }
-      if (password !== confirmSetupPassword) {
-        setError('Mật khẩu xác nhận không khớp.');
-        return;
-      }
-      setLoading(true);
-      try {
-        const res = await claimAdminPassword(password);
-        if (!res.success) {
-          setError(res.message || 'Không thể thiết lập mật khẩu Admin.');
-        } else if (onClose) {
-          onClose();
-        }
-      } catch (err: any) {
-        setError(err.message || 'Đã có lỗi xảy ra.');
-      } finally {
-        setLoading(false);
-      }
-      return;
-    }
-
     setLoading(true);
     try {
       const res = await login(username.trim(), password);
       if (!res.success) {
-        if (res.requiresSetup) {
-          setSetupMode(true);
-          setPassword('');
-          setConfirmSetupPassword('');
-        }
         setError(res.message || 'Đăng nhập thất bại.');
       } else {
         if (onClose) onClose();
@@ -305,11 +266,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             {pendingGoogleUser ? <Link2 className="w-6 h-6" /> : <Lock className="w-6 h-6" />}
           </div>
           <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">
-            {pendingGoogleUser
-              ? 'Liên kết Gmail với Tài khoản'
-              : showFirstRunSetup
-              ? 'Thiết lập Mật khẩu Admin Lần Đầu'
-              : 'Đăng nhập Hệ thống Quản lý'}
+            {pendingGoogleUser ? 'Liên kết Gmail với Tài khoản' : 'Đăng nhập Hệ thống Quản lý'}
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             Trường THCS Nguyễn Đăng Đạo
@@ -322,18 +279,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <div>
               <span className="font-bold block">Yêu cầu quyền chỉnh sửa:</span>
               <p className="text-blue-800 dark:text-blue-300 text-[11px] mt-0.5">{promptMessage}</p>
-            </div>
-          </div>
-        )}
-
-        {showFirstRunSetup && (
-          <div className="mb-4 flex items-start gap-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-900 dark:text-amber-200 border border-amber-200 dark:border-amber-800">
-            <CheckCircle2 className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-bold block">Kích hoạt bảo mật máy chủ cho Admin</span>
-              <p className="text-[11px] mt-0.5 leading-relaxed">
-                Hãy đặt mật khẩu riêng cho tài khoản <b>admin</b> (chỉ lưu băm bảo mật trên máy chủ) hoặc sử dụng nút <b>Đăng nhập bằng Google (Gmail)</b> bên dưới.
-              </p>
             </div>
           </div>
         )}
@@ -568,12 +513,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     id="login-username-input"
                     type="text"
                     value={username}
-                    onChange={(e) => {
-                      setUsername(e.target.value);
-                      if (setupMode && e.target.value.trim().toLowerCase() !== 'admin') {
-                        setSetupMode(false);
-                      }
-                    }}
+                    onChange={(e) => setUsername(e.target.value)}
                     placeholder="Nhập tên đăng nhập..."
                     className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 py-2.5 pl-9 pr-3 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
                     required
@@ -584,7 +524,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  {showFirstRunSetup ? 'Mật khẩu Admin mới' : 'Mật khẩu'}
+                  Mật khẩu
                 </label>
                 <div className="relative">
                   <KeyRound className="absolute left-3 top-3 w-4 h-4 text-slate-400" />
@@ -593,32 +533,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder={showFirstRunSetup ? 'Ít nhất 6 ký tự...' : 'Nhập mật khẩu'}
+                    placeholder="Nhập mật khẩu"
                     className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 py-2.5 pl-9 pr-3 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
                     required
                   />
                 </div>
               </div>
-
-              {showFirstRunSetup && (
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Xác nhận mật khẩu Admin mới
-                  </label>
-                  <div className="relative">
-                    <KeyRound className="absolute left-3 top-3 w-4 h-4 text-slate-400" />
-                    <input
-                      id="login-confirm-password-input"
-                      type="password"
-                      value={confirmSetupPassword}
-                      onChange={(e) => setConfirmSetupPassword(e.target.value)}
-                      placeholder="Nhập lại mật khẩu Admin"
-                      className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 py-2.5 pl-9 pr-3 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
-                      required
-                    />
-                  </div>
-                </div>
-              )}
 
               <button
                 id="btn-submit-login"
@@ -626,11 +546,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 disabled={loading || googleLoading}
                 className="w-full rounded-xl py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 shadow-md shadow-blue-600/20 transition disabled:opacity-50 cursor-pointer active:scale-95"
               >
-                {loading
-                  ? 'Đang xác thực...'
-                  : showFirstRunSetup
-                  ? 'Thiết lập & Đăng nhập Admin'
-                  : 'Đăng nhập'}
+                {loading ? 'Đang xác thực...' : 'Đăng nhập'}
               </button>
             </form>
 

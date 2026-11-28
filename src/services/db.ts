@@ -14,7 +14,7 @@ import {
   onSnapshot,
   writeBatch,
 } from 'firebase/firestore';
-import { db, auth, ADMIN_EMAIL } from '../firebase/config.ts';
+import { db, auth, ADMIN_EMAIL, ADMIN_EMAILS } from '../firebase/config.ts';
 import {
   UserAccount,
   Student,
@@ -88,7 +88,7 @@ export interface FirestoreErrorInfo {
 
 export function isFirebaseAdminSignedIn(): boolean {
   const user = auth?.currentUser;
-  return Boolean(user && user.emailVerified && user.email === ADMIN_EMAIL);
+  return Boolean(user && user.emailVerified && user.email && ADMIN_EMAILS.includes(user.email.toLowerCase()));
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): void {
